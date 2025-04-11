@@ -11,7 +11,7 @@ class SensorReader:
             "z": round(random.uniform(9.5,10.5), 2)
         }
     def _mock_gps_data(self):
-        #rand gps
+        #임의 GPS 데이터
         return {
             "lat": round(random.uniform(33.0, 38.0), 5),
             "lon": round(random.uniform(126.0, 130.0), 5)
