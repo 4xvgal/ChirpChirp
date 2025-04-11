@@ -10,22 +10,11 @@
 
 ```python
 {
-  "timestamp": "2025-04-11T15:30:00Z",
-  "accel": {
-    "x": 0.01,      # m/s²
-    "y": -0.03,
-    "z": 9.79
-  },
-  "gyro": {
-    "x": -0.5,      # deg/s
-    "y": 1.2,
-    "z": 0.0
-  },
-  "gps": {
-    "lat": 37.123456,    # degrees
-    "lon": 127.123456,
-    "alt": 31.2          # meters (optional)
-  }
+ {
+    "accel": {"x": float, "y": float, "z": float},
+    "gyro":  {"x": float, "y": float, "z": float},
+    "gps":   {"lat": float, "lon": float}
+}
 }
 ```
 
