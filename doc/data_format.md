@@ -11,10 +11,10 @@
 ```python
 {
  {
+    "timestamp": str,  # ISO 8601 format, e.g., "2025-04-11T15:30:00Z"
     "accel": {"x": float, "y": float, "z": float},
     "gyro":  {"x": float, "y": float, "z": float},
     "gps":   {"lat": float, "lon": float}
-}
 }
 ```
 
