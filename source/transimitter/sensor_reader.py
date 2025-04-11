@@ -28,8 +28,7 @@ class SensorReader:
         return{
             # caution: mock data
             "accel":self._mock_accel_data(),
-            "zyro":self._mock_gyro_data(),
-            "gps":self._mock_gps_data()
+            "gyro":self._mock_gyro_data(),
         }
     
 if __name__ == "__main__":
