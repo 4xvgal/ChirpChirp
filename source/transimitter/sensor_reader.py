@@ -10,6 +10,13 @@ class SensorReader:
             "y": round(random.uniform(-2.0,2.0), 2),
             "z": round(random.uniform(9.5,10.5), 2)
         }
+    def _mock_gyro_data(self):
+        #임의 자이로 데이터 
+        return {
+            "x": round(random.uniform(-250.0,250.0),1),
+            "y": round(random.uniform(-250.0,250.0),1),
+            "z": round(random.uniform(-250.0,250.0),1)
+        }
     def _mock_gps_data(self):
         #임의 GPS 데이터
         return {
@@ -21,6 +28,7 @@ class SensorReader:
         return{
             # caution: mock data
             "accel":self._mock_accel_data(),
+            "zyro":self._mock_gyro_data(),
             "gps":self._mock_gps_data()
         }
     
