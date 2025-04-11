@@ -19,6 +19,7 @@ class SensorReader:
     
     def get_sensor_data(self) -> dict:
         return{
+            # !! caution mockup data
             "accel":self._mock_accel_data(),
             "gps":self._mock_gps_data()
         }
@@ -27,4 +28,3 @@ if __name__ == "__main__":
     sensor_reader = SensorReader()
     data = sensor_reader.get_sensor_data()
     print(data)
-    
