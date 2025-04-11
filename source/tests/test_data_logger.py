@@ -1,7 +1,7 @@
 import sys
 import os
 sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
-from reciever.data_logger import SessionLogger
+from receiver.data_logger import SessionLogger
 from transmitter.sensor_reader import SensorReader
 
 reader = SensorReader()
