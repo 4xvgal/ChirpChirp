@@ -138,7 +138,7 @@ if __name__ == "__main__":
     print(f"테스트: 시리얼 포트 {SERIAL_PORT}에서 메시지 수신 시도...")
 
     # 테스트 목적으로 함수 직접 호출
-    result_data = receive_and_process_message(port=SERIAL_PORT, baud=BAUD_RATE)
+    result_data = receive_loop(port=SERIAL_PORT, baud=BAUD_RATE)
 
     if result_data:
         print("\n[테스트 결과] 데이터 수신 및 복원 성공:")
