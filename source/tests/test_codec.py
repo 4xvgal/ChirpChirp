@@ -1,4 +1,10 @@
-from transmitter import encoder, decoder
+import sys
+import os
+sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
+
+from receiver.decoder import decompress_data
+from transmitter.encoder import compress_data
+
 
 
 def test_compression_cycle(original_data):
@@ -10,13 +16,13 @@ def test_compression_cycle(original_data):
     print("[Test] Original data:", original_data)
     
     # 1) 압축
-    compressed = encoder.compress_data(original_data)
+    compressed = compress_data(original_data)
     
     # 2) (가상) 전송 후 수신된 압축 데이터라고 가정
     received_compressed_data = compressed  # 실제로는 네트워크 전송 등
     
     # 3) 복원
-    restored_data = decoder.decompress_data(received_compressed_data)
+    restored_data = decompress_data(received_compressed_data)
     
     # 결과 확인
     print("[Test] Restored data:", restored_data)
