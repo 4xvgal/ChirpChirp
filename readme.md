@@ -35,15 +35,22 @@ LoRaDataSystem/
 ```
 
 ## 🔁 시스템 데이터 흐름
-```mermaid
-graph TD
-  A[센서 데이터 수집 (시계열)] --> B[ML 기반 압축 (Encoding)]
-  B --> C[LoRa 패킷 분할]
-  C --> D[LoRa 송신 (E22)]
-  D --> E[LoRa 수신 (E22)]
-  E --> F[패킷 재조립]
-  F --> G[압축 해제 (Decoding)]
-  G --> H[CSV 저장 (수신 완료)]
-  ```
+```
+[센서 데이터 수집] 
+        ↓
+[ML 기반 압축]
+        ↓
+[LoRa 패킷 분할]
+        ↓
+[LoRa 송신 (E22)]
+        ↓
+[LoRa 수신 (E22)]
+        ↓
+[패킷 재조립]
+        ↓
+[압축 해제 (Decoding)]
+        ↓
+[CSV 저장 (수신 완료)]
+```
 
 
