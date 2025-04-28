@@ -1,38 +1,125 @@
 # sender.py
-import serial, time, json, base64
-from sensor_reader import SensorReader
+import time
+import logging
+import serial
+import argparse
 
-SERIAL_PORT = '/dev/ttyS0'
-BAUD_RATE    = 9600
-MAX_CHUNK    = 50    # 바이트 단위
+from e22_config import init_serial
+from packetizer import split_into_packets
+from encoder import compress_data
 
-def split_bytes(data: bytes, size: int):
-    return [ data[i:i+size] for i in range(0, len(data), size) ]
+# 로깅 설정
+logging.basicConfig(
+    level=logging.INFO,
+    format='%(asctime)s - %(levelname)s - %(message)s'
+)
 
-def send_sensor_packets():
-    # 1) 시리얼 포트 오픈
-    ser = serial.Serial(SERIAL_PORT, BAUD_RATE, timeout=1)
-    time.sleep(1)
+# 패킷당 최대 LoRa 전송 바이트 수(헤더 포함)
+HEADER_SIZE = 2  # seq(1 byte) + total(1 byte)
+MAX_PAYLOAD_SIZE = 50 - HEADER_SIZE
 
-    # 2) 센서 데이터 취득 및 JSON 직렬화
-    reader = SensorReader()
-    sensor_dict = reader.get_sensor_data()
-    raw = json.dumps(sensor_dict).encode('utf-8')
+def open_serial():
+    """
+    시리얼 포트를 초기화하여 반환합니다.
+    """
+    ser = init_serial()
+    logging.info(f"시리얼 포트 열림: {ser.port} @ {ser.baudrate}bps")
+    time.sleep(0.1)
+    return ser
 
-    # 3) 바이트 분할 → Base64 인코딩 → JSON 패킷 생성
-    chunks = split_bytes(raw, MAX_CHUNK)
-    total = len(chunks)
+def close_serial(ser):
+    """
+    열린 시리얼 포트를 닫습니다.
+    """
+    if ser and ser.is_open:
+        ser.close()
+        logging.info("시리얼 포트 닫힘")
 
-    for seq, chunk in enumerate(chunks, start=1):
-        b64 = base64.b64encode(chunk).decode('ascii')
-        packet = {"seq": seq, "total": total, "payload": b64}
-        line = json.dumps(packet) + "\n"
+def send_packet(ser, data: bytes) -> bool:
+    """
+    단일 LoRa 패킷을 전송합니다.
 
-        ser.write(line.encode('utf-8'))
-        print(f"[Sender] 보낸 패킷 {seq}/{total}")
-        time.sleep(0.05)  # 흐름 조절
+    Args:
+        ser: 초기화된 Serial 인스턴스
+        data: 전송할 바이트 데이터
+    Returns:
+        bool: 성공 시 True, 실패 시 False
+    """
+    try:
+        written = ser.write(data)
+        ser.flush()
+        if written == len(data):
+            logging.info(f"패킷 전송 성공 ({written}/{len(data)} bytes)")
+            return True
+        else:
+            logging.warning(f"부분 전송 발생 ({written}/{len(data)} bytes)")
+            return False
+    except serial.SerialTimeoutException:
+        logging.error("쓰기 타임아웃 발생")
+        return False
+    except serial.SerialException as e:
+        logging.error(f"시리얼 통신 오류: {e}")
+        return False
+    except Exception as e:
+        logging.error(f"예기치 않은 오류: {e}")
+        return False
 
-    ser.close()
+def send_data(obj) -> bool:
+    """
+    Python 객체를 압축하여 패킷 단위로 분할 송신합니다.
 
-if __name__ == "__main__":
-    send_sensor_packets()
+    Args:
+        obj: JSON 직렬화 가능한 Python 객체
+    Returns:
+        bool: 전체 전송 성공 시 True, 중간 실패 시 False
+    """
+    compressed = compress_data(obj)
+    packets = split_into_packets(compressed, max_size=MAX_PAYLOAD_SIZE)
+    total = len(packets)
+    logging.info(f"총 {total}개의 패킷으로 분할됨")
+
+    ser = open_serial()
+    try:
+        for pkt in packets:
+            seq = pkt['seq']
+            payload = pkt['payload']
+            header = bytes([seq, total])
+            frame = header + payload
+
+            logging.info(f"패킷 {seq}/{total} 전송 중...")
+            if not send_packet(ser, frame):
+                logging.error(f"패킷 {seq} 전송 실패. 전체 전송 중단.")
+                return False
+            time.sleep(0.05)
+
+        logging.info("모든 패킷 전송 완료")
+        return True
+    finally:
+        close_serial(ser)
+
+def send_raw_packet():
+    """
+    테스트용 raw 바이트 패킷 전송
+    """
+    ser = open_serial()
+    try:
+        dummy = b'\xAA\xBBTESTPACKET'
+        logging.info("[테스트] send_packet 함수 실행")
+        result = send_packet(ser, dummy)
+        logging.info(f"send_packet 결과: {'성공' if result else '실패'}")
+    finally:
+        close_serial(ser)
+
+if __name__ == '__main__':
+    parser = argparse.ArgumentParser(description='LoRa 송신 테스트 유틸리티')
+    parser.add_argument('--mode', choices=['packet', 'data'], default='data',
+                        help='packet: raw 바이트 패킷 테스트, data: Python 객체 전송 테스트')
+    args = parser.parse_args()
+
+    if args.mode == 'packet':
+        send_raw_packet()
+    else:
+        sample = {'message': 'Hello LoRa', 'value': 123, 'timestamp': time.time()}
+        logging.info("[테스트] send_data 함수 실행")
+        result = send_data(sample)
+        logging.info(f"send_data 결과: {'성공' if result else '실패'}")
