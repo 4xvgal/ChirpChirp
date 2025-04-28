@@ -102,6 +102,8 @@ def send_data(obj, count: int = 100) -> int:
         else:
             logging.error(f"[반복 전송] {i}/{count}번째 전송 실패, 중단")
             break
+        # 전송 간 간격: 1초
+        time.sleep(1)
     logging.info(f"[반복 전송] 완료: {success}/{count} 성공")
     return success
 
@@ -119,3 +121,4 @@ if __name__ == '__main__':
     # 반복 전송 테스트
     logging.info("[테스트] send_data() 반복 전송 테스트 시작 (기본 100회)")
     result_count = send_data(sample_obj)
+    logging.info(f"[테스트] send_data 결과: {result_count}/100 성공")
