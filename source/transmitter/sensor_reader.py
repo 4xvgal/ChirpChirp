@@ -32,7 +32,7 @@ class SensorReader:
             "gps":self._mock_gps_data()\
         }
     
-if __name__ == "__main__":
+'''if __name__ == "__main__":
     sensor_reader = SensorReader()
     data = sensor_reader.get_sensor_data()
-    print(data)
+    print(data)'''

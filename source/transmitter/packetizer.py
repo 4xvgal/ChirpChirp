@@ -36,7 +36,7 @@ def split_into_packets(data: bytes, max_size: int = 50) -> List[dict]:
 
     return packets
 
-# 테스트 코드 (직접 실행 시)
+'''# 테스트 코드 (직접 실행 시)
 if __name__ == "__main__":
     import zlib
 
@@ -54,3 +54,4 @@ if __name__ == "__main__":
             "payload_len": len(p["payload"]),
             "payload": p["payload"]
         })
+    '''

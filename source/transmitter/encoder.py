@@ -27,4 +27,3 @@ def compress_data(data) -> bytes:
     print("[compress_data] 압축률 : {:.2f}%".format(compression_ratio))
     
     return compressed_data
-

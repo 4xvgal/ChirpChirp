@@ -1,0 +1,22 @@
+# e22_config.py
+import serial
+
+# 변경이 필요한 설정값
+SERIAL_PORT    = '/dev/ttyS0'
+BAUD_RATE      = 9600
+WRITE_TIMEOUT  = 2    # 초
+READ_TIMEOUT   = 1    # 초
+
+def init_serial() -> serial.Serial:
+    """
+    E22 모듈용 시리얼 포트를 열고 반환합니다.
+    """
+    return serial.Serial(
+        port=SERIAL_PORT,
+        baudrate=BAUD_RATE,
+        bytesize=serial.EIGHTBITS,
+        parity=serial.PARITY_NONE,
+        stopbits=serial.STOPBITS_ONE,
+        timeout=READ_TIMEOUT,
+        write_timeout=WRITE_TIMEOUT
+    )
