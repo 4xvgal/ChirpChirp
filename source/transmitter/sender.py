@@ -1,6 +1,7 @@
 import time
 import logging
 import serial
+import argparse
 
 from e22_config import init_serial
 from packetizer import split_into_packets
@@ -26,12 +27,12 @@ def send_packet(data: bytes) -> bool:
     Returns:
         bool: 성공 시 True, 실패 시 False
     """
+    ser = None
     try:
         ser = init_serial()
         logging.info(f"시리얼 포트 열림: {ser.port} @ {ser.baudrate}bps")
-        time.sleep(0.1)  # 모듈 안정화 대기
+        time.sleep(0.1)
 
-        # 데이터 쓰기
         written = ser.write(data)
         ser.flush()
 
@@ -52,12 +53,9 @@ def send_packet(data: bytes) -> bool:
         logging.error(f"예기치 않은 오류: {e}")
         return False
     finally:
-        try:
-            if ser and ser.is_open:
-                ser.close()
-                logging.info("시리얼 포트 닫힘")
-        except NameError:
-            pass
+        if ser and ser.is_open:
+            ser.close()
+            logging.info("시리얼 포트 닫힘")
 
 
 def send_data(obj) -> bool:
@@ -69,19 +67,14 @@ def send_data(obj) -> bool:
     Returns:
         bool: 전체 전송 성공 시 True, 중간 실패 시 False
     """
-    # 1) 데이터 압축
     compressed = compress_data(obj)
-
-    # 2) 패킷 분할
     packets = split_into_packets(compressed, max_size=MAX_PAYLOAD_SIZE)
     total = len(packets)
     logging.info(f"총 {total}개의 패킷으로 분할됨")
 
-    # 3) 순차 전송
     for pkt in packets:
         seq = pkt['seq']
         payload = pkt['payload']
-        # 헤더: seq, total (각 1 byte)
         header = bytes([seq, total])
         frame = header + payload
 
@@ -89,16 +82,26 @@ def send_data(obj) -> bool:
         if not send_packet(frame):
             logging.error(f"패킷 {seq} 전송 실패. 전체 전송 중단.")
             return False
-        time.sleep(0.05)  # 송신 간 짧은 딜레이
+        time.sleep(0.05)
 
     logging.info("모든 패킷 전송 완료")
     return True
 
-'''
-if __name__ == '__main__':
-    # 테스트용 예시 객체 송신
-    sample = {'message': 'Hello LoRa', 'value': 123}
-    result = send_data(sample)
-    logging.info(f"전송 최종 결과: {'성공' if result else '실패'}")
 
-'''
+if __name__ == '__main__':
+    parser = argparse.ArgumentParser(description='LoRa 송신 테스트 유틸리티')
+    parser.add_argument('--mode', choices=['packet', 'data'], default='data',
+                        help='packet: raw 바이트 패킷 테스트, data: Python 객체 전송 테스트')
+    args = parser.parse_args()
+
+    if args.mode == 'packet':
+        dummy = b'\xAA\xBBTESTPACKET'
+        logging.info("[테스트] send_packet 함수 실행")
+        result = send_packet(dummy)
+        logging.info(f"send_packet 결과: {'성공' if result else '실패'}")
+    else:
+        sample = {'message': 'Hello LoRa', 'value': 123, 'timestamp': time.time()}
+        logging.info("[테스트] send_data 함수 실행")
+        result = send_data(sample)
+        logging.info(f"send_data 결과: {'성공' if result else '실패'}")
+

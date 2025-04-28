@@ -129,8 +129,7 @@ def receive_loop(port=SERIAL_PORT, baud=BAUD_RATE, serial_timeout=DEFAULT_TIMEOU
         print(f"[{datetime.datetime.now():%Y-%m-%d %H:%M:%S}] Receiver: 종료됨 (상태: {status}, 소요시간: {elapsed_time:.2f} 초)")
         # 최종 데이터는 return 문에서 반환됨
 
-
-"""  테스트 용 
+ 
 if __name__ == "__main__":
     print("="*30)
     print(" Receiver Module - Direct Test ")
@@ -148,4 +147,3 @@ if __name__ == "__main__":
         print("\n[테스트 결과] 데이터 수신 또는 복원에 실패했습니다.")
 
     print("\nReceiver Module 테스트 종료.") 
-""" 

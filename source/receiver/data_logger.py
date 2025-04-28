@@ -75,7 +75,7 @@ class SessionLogger:
             writer = csv.DictWriter(f, fieldnames=self.fieldnames)
             writer.writerow(row)
 
-
+'''
 if __name__ == "__main__":
     from transmitter.sensor_reader import SensorReader
     reader = SensorReader()
@@ -84,3 +84,6 @@ if __name__ == "__main__":
     for _ in range(10):
         data = reader.get_sensor_data()
         logger.log(data)
+
+
+'''
