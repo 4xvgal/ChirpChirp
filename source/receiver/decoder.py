@@ -1,23 +1,25 @@
-import json
+
+# decoder.py
+"""
+재조립된 바이트 메시지를 압축 해제하고 센서값 딕셔너리로 변환
+"""
 import zlib
 
-def decompress_data(data: bytes) -> dict:
-    """
-    압축된 바이너리 데이터를 zlib으로 해제 후,
-    JSON 형식으로 파싱하여 dict 형태의 원본 데이터를 반환합니다.
-    
-    복원 실패 시 예외를 처리하고 None을 반환하여 fallback 합니다.
-    """
+def decompress_data(data: bytes):
     try:
-        # 1) zlib 해제
-        decompressed_bytes = zlib.decompress(data)
-        
-        # 2) JSON 디코딩
-        json_str = decompressed_bytes.decode('utf-8')
-        original_data = json.loads(json_str)
-        
-        return original_data
-    except Exception as e:
-        # 복원 실패 시 예외 로깅 및 fallback 처리
-        print(f"[decompress_data] 복원 실패: {e}")
+        raw = zlib.decompress(data)
+    except zlib.error:
+        return None
+    try:
+        parts = raw.decode('utf-8').split(',')
+        if len(parts) != 9:
+            return None
+        keys = [
+            'accel_x','accel_y','accel_z',
+            'gyro_x','gyro_y','gyro_z',
+            'gps_lat','gps_lon','gps_alt'
+        ]
+        values = [float(p) for p in parts]
+        return dict(zip(keys, values))
+    except Exception:
         return None
