@@ -76,6 +76,7 @@ def receive_loop(port=SERIAL_PORT, baud=BAUD_RATE, serial_timeout=DEFAULT_TIMEOU
 
 
                             print(f"[{timestamp}] Receiver: 재조립 완료 (Reassembler) - {len(reassembled_data)} bytes")
+                            print("[DEBUG] header bytes:", reassembled_data[:2].hex())
                             
                             # decoder.py
                             sensor_data = decoder.decompress_data(reassembled_data)
