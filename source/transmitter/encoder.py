@@ -1,104 +1,29 @@
-import time
-import logging
-import serial
+import json
+import zlib
 
-from e22_config import init_serial
-from packetizer import split_into_packets
-from encoder import compress_data
-
-# 로깅 설정
-logging.basicConfig(
-    level=logging.INFO,
-    format='%(asctime)s - %(levelname)s - %(message)s'
-)
-
-# 패킷당 최대 LoRa 전송 바이트 수(헤더 포함)
-HEADER_SIZE = 2  # seq(1 byte) + total(1 byte)
-MAX_PAYLOAD_SIZE = 50 - HEADER_SIZE
-
-
-def send_packet(data: bytes) -> bool:
+def compress_data(data) -> bytes:
     """
-    단일 LoRa 패킷을 전송합니다.
-
-    Args:
-        data: 전송할 바이트 데이터
-    Returns:
-        bool: 성공 시 True, 실패 시 False
+    주어진 Python 객체(data)를 JSON 직렬화 후 zlib으로 압축하여 반환합니다.
+    추후 신러닝 기반 압축 모델로 교체하기 쉽게 함수 인터페이스는 그대로 유지합니다.
     """
-    try:
-        ser = init_serial()
-        logging.info(f"시리얼 포트 열림: {ser.port} @ {ser.baudrate}bps")
-        time.sleep(0.1)  # 모듈 안정화 대기
-
-        # 데이터 쓰기
-        written = ser.write(data)
-        ser.flush()
-
-        if written == len(data):
-            logging.info(f"패킷 전송 성공 ({written}/{len(data)} bytes)")
-            return True
-        else:
-            logging.warning(f"부분 전송 발생 ({written}/{len(data)} bytes)")
-            return False
-
-    except serial.SerialTimeoutException:
-        logging.error("쓰기 타임아웃 발생")
-        return False
-    except serial.SerialException as e:
-        logging.error(f"시리얼 통신 오류: {e}")
-        return False
-    except Exception as e:
-        logging.error(f"예기치 않은 오류: {e}")
-        return False
-    finally:
-        try:
-            if ser and ser.is_open:
-                ser.close()
-                logging.info("시리얼 포트 닫힘")
-        except NameError:
-            pass
-
-
-def send_data(obj) -> bool:
-    """
-    Python 객체를 압축하여 패킷 단위로 분할 송신합니다.
-
-    Args:
-        obj: JSON 직렬화 가능한 Python 객체
-    Returns:
-        bool: 전체 전송 성공 시 True, 중간 실패 시 False
-    """
-    # 1) 데이터 압축
-    compressed = compress_data(obj)
-
-    # 2) 패킷 분할
-    packets = split_into_packets(compressed, max_size=MAX_PAYLOAD_SIZE)
-    total = len(packets)
-    logging.info(f"총 {total}개의 패킷으로 분할됨")
-
-    # 3) 순차 전송
-    for pkt in packets:
-        seq = pkt['seq']
-        payload = pkt['payload']
-        # 헤더: seq, total (각 1 byte)
-        header = bytes([seq, total])
-        frame = header + payload
-
-        logging.info(f"패킷 {seq}/{total} 전송 중...")
-        if not send_packet(frame):
-            logging.error(f"패킷 {seq} 전송 실패. 전체 전송 중단.")
-            return False
-        time.sleep(0.05)  # 송신 간 짧은 딜레이
-
-    logging.info("모든 패킷 전송 완료")
-    return True
-
-'''
-if __name__ == '__main__':
-    # 테스트용 예시 객체 송신
-    sample = {'message': 'Hello LoRa', 'value': 123}
-    result = send_data(sample)
-    logging.info(f"전송 최종 결과: {'성공' if result else '실패'}")
-
-'''
+    # 1) JSON 직렬화
+    json_str = json.dumps(data)
+    byte_data = json_str.encode('utf-8')
+    
+    # 2) zlib 압축 (level=9는 최대 압축)
+    compressed_data = zlib.compress(byte_data, level=9)
+    
+    # 3) 크기 비교 로그 (압축률 확인용)
+    original_size = len(byte_data)
+    compressed_size = len(compressed_data)
+    
+    if original_size > 0:
+        compression_ratio = (1 - (compressed_size / original_size)) * 100
+    else:
+        compression_ratio = 0.0
+    
+    print("[compress_data] 원본 크기 :", original_size, "bytes")
+    print("[compress_data] 압축 후 크기 :", compressed_size, "bytes")
+    print("[compress_data] 압축률 : {:.2f}%".format(compression_ratio))
+    
+    return compressed_data
