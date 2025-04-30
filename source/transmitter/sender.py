@@ -8,6 +8,7 @@ import base64
 from e22_config import init_serial
 from packetizer import split_into_packets
 from encoder import compress_data
+from sensor_reader import SensorReader  # 센서 리더 모듈 임포트
 
 # 로깅 설정
 logging.basicConfig(
@@ -49,20 +50,19 @@ def send_packet(ser, data: bytes) -> bool:
         if written == len(data):
             logging.info(f"패킷 전송 성공 ({written}/{len(data)} bytes)")
             return True
-        else:
-            logging.warning(f"부분 전송 발생 ({written}/{len(data)} bytes)")
-            return False
+        logging.warning(f"부분 전송 발생 ({written}/{len(data)} bytes)")
+        return False
     except serial.SerialException as e:
         logging.error(f"시리얼 오류: {e}")
         return False
 
 
-def _send_once(obj) -> bool:
+def _send_once(data_obj) -> bool:
     """
-    Python 객체를 한 번 전송합니다.
-    객체를 JSON 직렬화→zlib 압축→패킷 분할→Base64 인코딩→JSON 전송
+    주어진 센서 데이터 객체를 한 번 전송합니다.
+    JSON 직렬화→zlib 압축→패킷 분할→Base64 인코딩→JSON 전송
     """
-    compressed = compress_data(obj)
+    compressed = compress_data(data_obj)
     packets = split_into_packets(compressed, max_size=MAX_PAYLOAD_SIZE)
     total = len(packets)
     logging.info(f"[단일 전송] 총 {total}개의 패킷 분할됨")
@@ -84,25 +84,26 @@ def _send_once(obj) -> bool:
         close_serial(ser)
 
 
-def send_data(obj, count: int = 100) -> int:
+def send_data(count: int = 100) -> int:
     """
-    주어진 객체를 지정한 횟수만큼 연속 전송합니다.
+    SensorReader를 이용해 센서 데이터를 count회 연속 전송합니다.
 
     Args:
-        obj: JSON 직렬화 가능한 Python 객체
         count: 전송 반복 횟수 (기본값 100)
     Returns:
         성공적으로 전송된 횟수
     """
+    reader = SensorReader()
     success = 0
     for i in range(1, count + 1):
-        logging.info(f"[반복 전송] {i}/{count}번째 전송 시작")
-        if _send_once(obj):
+        data = reader.get_sensor_data()
+        logging.info(f"[반복 전송] {i}/{count}번째 전송 시작 - 데이터: {data}")
+        if _send_once(data):
             success += 1
         else:
             logging.error(f"[반복 전송] {i}/{count}번째 전송 실패, 중단")
             break
-        # 전송 간 간격: 1초
+        # 전송 간 1초 대기
         time.sleep(1)
     logging.info(f"[반복 전송] 완료: {success}/{count} 성공")
     return success
@@ -110,15 +111,7 @@ def send_data(obj, count: int = 100) -> int:
 
 # 테스트 코드
 if __name__ == '__main__':
-    # 샘플 데이터 생성
-    sample_obj = {'message': 'Hello Test', 'value': 42, 'timestamp': time.time()}
-
-    # 단일 전송 테스트
-    logging.info("[테스트] _send_once() 단일 전송 테스트 시작")
-    result_once = _send_once(sample_obj)
-    logging.info(f"[테스트] _send_once 결과: {'성공' if result_once else '실패'}")
-
     # 반복 전송 테스트
     logging.info("[테스트] send_data() 반복 전송 테스트 시작 (기본 100회)")
-    result_count = send_data(sample_obj)
+    result_count = send_data()
     logging.info(f"[테스트] send_data 결과: {result_count}/100 성공")
