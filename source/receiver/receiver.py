@@ -7,7 +7,7 @@ from packet_reassembler import PacketReassembler, PacketFormatError, PacketReass
 import decoder  # 압축 해제 및 데이터 복원 모듈
 
 # 시리얼 설정
-SERIAL_PORT = '/dev/ttyS0'
+SERIAL_PORT = '/dev/serial0'
 BAUD_RATE = 9600
 DEFAULT_TIMEOUT = 1  # 시리얼 읽기 타임아웃 (초)
 
