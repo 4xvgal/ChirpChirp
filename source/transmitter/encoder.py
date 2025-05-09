@@ -8,21 +8,21 @@ from __future__ import annotations
 import struct, zlib, math
 from typing import Dict, Any, List
 
-# ────────── 직렬화 ──────────
-_FMT = "<Ihhhhhhhhhff"            # 4+18+8 = 30 B → zlib 압축 후 18~22 B
+
+_FMT = "<Ihhhhhhhhhff"            
 _FIELDS = (
-    ("ts",        1),             # uint32  (s)
-    ("accel.ax",  1000),          # int16   (0.001 g)
-    ("accel.ay",  1000),
-    ("accel.az",  1000),
-    ("gyro.gx",   10),            # int16   (0.1 °/s)
-    ("gyro.gy",   10),
-    ("gyro.gz",   10),
-    ("angle.roll", 10),           # int16   (0.1 °)
-    ("angle.pitch",10),
-    ("angle.yaw", 10),
-    ("gps.lat",   1.0),           # float32 (°)
-    ("gps.lon",   1.0),
+    ("ts",        1),             #(Unsigned Integer, 4 바이트)
+    ("accel.ax",  1000),          # (Signed Short, 2 바이트)
+    ("accel.ay",  1000),        # (Signed Short, 2 바이트)
+    ("accel.az",  1000),    # (Signed Short, 2 바이트)
+    ("gyro.gx",   10),         # (Signed Short, 2 바이트)
+    ("gyro.gy",   10),        # (Signed Short, 2 바이트)
+    ("gyro.gz",   10),    # (Signed Short, 2 바이트)
+    ("angle.roll", 10),             # (Signed Short, 2 바이트)
+    ("angle.pitch",10),        # (Signed Short, 2 바이트)
+    ("angle.yaw", 10),   # (Signed Short, 2 바이트)
+    ("gps.lat",   1.0),           # (Float, 4 바이트)
+    ("gps.lon",   1.0),          # (Float, 4 바이트)
 )
 
 def _extract(src: Dict[str, Any], dotted: str):

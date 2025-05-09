@@ -1,7 +1,5 @@
 # -*- coding: utf-8 -*-
-"""
-sender.py — LoRa 트랜스미터 (한 번만 SYN/ACK → 1000회 연속 프레임 전송)
-"""
+
 from __future__ import annotations
 import time, logging, serial
 from typing import Any, Dict, List
@@ -55,10 +53,10 @@ def _handshake(s: serial.Serial) -> bool:
 
 
 def send_data(n: int = SEND_COUNT) -> int:
-    """한 번 핸드셰이크 → n회 센서 읽고 프레임 전송"""
+
     s = _open_serial()
     if not _handshake(s):
-        logging.error("핸드셰이크 최종 실패, 종료합니다.")
+        logging.error("핸드셰이크 최종 실패, 종료.")
         s.close()
         return 0
 

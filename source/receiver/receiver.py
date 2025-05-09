@@ -130,20 +130,17 @@ def receive_loop():
                     payload = decoder.decompress_data(blob)
                     
                     if payload is None:
-                        # decoder.py 내부에서 "[decoder] 복원 실패: ..." 로그 출력됨
+                        
                         logging.error(f"[receiver] 메시지 #{received_message_count} 데이터 디코딩 실패 (payload is None)")
                         reasm.reset(); buf.clear()
                         inter_arrival.clear(); pkt_sizes.clear(); total_bytes = 0; first_t = last_t = None
                         continue
-
-                    # ────────── 수신된 payload 내용 터미널 출력 ──────────
+                    
                     logging.info(f"--- 메시지 #{received_message_count} 수신 데이터 (payload) ---")
                     
-                    # 방법 1: JSON 형태로 전체 딕셔너리 출력 (들여쓰기 적용)
-                    # logging.info(json.dumps(payload, indent=2, ensure_ascii=False))
+               
 
-                    # 방법 2: 주요 항목을 포맷하여 가독성 있게 출력 (권장)
-                    ts_value = payload.get('ts', 0.0) # 기본값 0.0으로 설정 (float이므로)
+                    ts_value = payload.get('ts', 0.0) 
                     ts_human_readable = datetime.datetime.fromtimestamp(ts_value).strftime('%Y-%m-%d %H:%M:%S.%f')[:-3]
                     
                     accel = payload.get('accel', {})
@@ -158,7 +155,7 @@ def receive_loop():
                     display_message.append(f"  Angle (°): Roll={angle.get('roll', 'N/A'):.1f}, Pitch={angle.get('pitch', 'N/A'):.1f}, Yaw={angle.get('yaw', 'N/A'):.1f}")
                     display_message.append(f"  GPS (°): Lat={gps.get('lat', 'N/A'):.6f}, Lon={gps.get('lon', 'N/A'):.6f}")
                     logging.info("\n".join(display_message)) # 각 줄을 개행으로 연결하여 출력
-                    # ─────────────────────────────────────────────────────
+              
 
                     latency = int((now - first_t) * 1000) if first_t is not None else 0
                     jitter  = statistics.pstdev(inter_arrival) if len(inter_arrival) > 1 else 0.0
