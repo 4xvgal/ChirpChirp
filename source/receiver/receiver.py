@@ -40,11 +40,12 @@ def receive_loop():
     try:
         while True:
             # ─── SYN/ACK (ASCII) ───
-            if ser.in_waiting and ser.peek(1)[:1] == b'S':
-                line = ser.readline()
-                if line.strip() == b"SYN":
+            if ser.in_waiting and ser.read(1) == b'S':
+                line = ser.readline()           # 나머지 읽어서 SYN\r\n 확인
+                if (b'S' + line).strip() == b"SYN":
                     ser.write(ACK_MSG)
                 continue
+
 
             # ─── 바이너리 프레임 ───
             if ser.in_waiting:
