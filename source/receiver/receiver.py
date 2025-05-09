@@ -1,7 +1,8 @@
 # -*- coding: utf-8 -*-
 """
-receiver.py — LoRa 리시버 (LEN-SEQ-TOTAL-PAYLOAD)
-· readline() 핸드셰이크 → LEN 기반 버퍼 파싱
+receiver.py — LoRa 리시버 (LEN-SEQ-TOTAL-PAYLOAD)  
+· SYN/ACK：(CRLF)-라인 단위 → flush →  
+· 이후 LEN 기반 버퍼 파싱
 """
 from __future__ import annotations
 import os, time, json, datetime, statistics, serial
@@ -11,16 +12,16 @@ from packet_reassembler import PacketReassembler, PacketReassemblyError
 import decoder
 
 # ────────── 설정 ──────────
-PORT             = "/dev/serial0"
-BAUD             = 9600
-HANDSHAKE_TO     = 2.0     # SYN 기다릴 최대 시간
-READ_TIMEOUT     = 0.05
-FRAME_MAX        = 58      # 2B 헤더 + 56B payload
-DATA_DIR         = "data/raw"
+PORT            = "/dev/serial0"
+BAUD            = 9600
+HANDSHAKE_TO    = 2.0
+READ_TIMEOUT    = 0.05
+FRAME_MAX       = 58
+DATA_DIR        = "data/raw"
 os.makedirs(DATA_DIR, exist_ok=True)
 
-SYN = b"SYN\n"
-ACK = b"ACK\n"
+SYN = b"SYN\r\n"
+ACK = b"ACK\r\n"
 
 
 def _log_json(payload: dict, meta: dict):
@@ -35,25 +36,25 @@ def _log_json(payload: dict, meta: dict):
 
 
 def receive_loop():
-    ser   = serial.Serial(PORT, BAUD, timeout=HANDSHAKE_TO)
+    ser = serial.Serial(PORT, BAUD, timeout=HANDSHAKE_TO)
     reasm = PacketReassembler()
-    buf   = deque()
+    buf = deque()
 
-    inter: list[float] = []
-    pkt_sizes: list[int] = []
+    inter = []
+    pkt_sizes = []
     total_bytes = 0
     first_t = last_t = None
 
     print(f"[{datetime.datetime.now():%F %T}] Receiver start {PORT}@{BAUD}")
 
-    # 1) SYN/ACK 핸드셰이크 (줄 단위)
+    # 1) SYN/ACK 핸드셰이크 (CRLF 라인 단위)
     while True:
         line = ser.readline()
-        if line.strip() == SYN.strip():
-            ser.write(ACK)
+        if line == SYN:
+            ser.write(ACK); ser.flush()
             break
 
-    # 2) 본격 데이터 수신 (바이너리 LEN 파싱)
+    # 2) 데이터 수신 (LEN-파서)
     ser.timeout = READ_TIMEOUT
     try:
         while True:
@@ -69,16 +70,15 @@ def receive_loop():
                     continue
                 if len(buf) < 1 + length:
                     break
-                buf.popleft()  # LEN 제거
+                buf.popleft()
                 frame = bytes(buf.popleft() for _ in range(length))
 
-                # 통계 업데이트
                 now = time.time()
                 if last_t is not None:
-                    inter.append((now - last_t) * 1000)
+                    inter.append((now - last_t)*1000)
                 last_t = now
-                pkt_sizes.append(length + 1)
-                total_bytes += length + 1
+                pkt_sizes.append(length+1)
+                total_bytes += length+1
 
                 try:
                     blob = reasm.process_frame(frame)
@@ -90,21 +90,21 @@ def receive_loop():
                         print("[decoder] FAIL")
                         continue
 
-                    latency = int((now - first_t) * 1000) if first_t else 0
-                    jitter  = statistics.pstdev(inter) if len(inter) > 1 else 0.0
+                    latency = int((now - first_t)*1000) if first_t else 0
+                    jitter  = statistics.pstdev(inter) if len(inter)>1 else 0.0
                     meta = {
                         "bytes": len(blob),
                         "latency_ms": latency,
-                        "jitter_ms": round(jitter, 2),
+                        "jitter_ms": round(jitter,2),
                         "total_bytes": total_bytes,
-                        "avg_pkt": round(sum(pkt_sizes)/len(pkt_sizes), 2),
-                        "avg_pkt2": round(sum(x*x for x in pkt_sizes)/len(pkt_sizes), 2),
+                        "avg_pkt": round(sum(pkt_sizes)/len(pkt_sizes),2),
+                        "avg_pkt2": round(sum(x*x for x in pkt_sizes)/len(pkt_sizes),2),
                     }
                     print(f"[{datetime.datetime.now():%H:%M:%S.%f} OK] "
                           f"{meta['bytes']}B, lat {latency} ms, jit {meta['jitter_ms']} ms")
                     _log_json(payload, meta)
 
-                    # 새 메시지 통계 초기화
+                    # reset for next message
                     buf.clear()
                     inter.clear(); pkt_sizes.clear()
                     total_bytes = 0
