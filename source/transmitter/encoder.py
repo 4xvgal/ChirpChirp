@@ -1,29 +1,56 @@
-import json
-import zlib
+# -*- coding: utf-8 -*-
+"""
+encoder.py
+• 센서 dict  →  struct 바이너리 → zlib 압축
+• 압축 블록을 LoRa 최대 56 B로 쪼개는 split_into_packets()
+"""
+from __future__ import annotations
+import struct, zlib, math
+from typing import Dict, Any, List
 
-def compress_data(data) -> bytes:
-    """
-    주어진 Python 객체(data)를 JSON 직렬화 후 zlib으로 압축하여 반환합니다.
-    추후 신러닝 기반 압축 모델로 교체하기 쉽게 함수 인터페이스는 그대로 유지합니다.
-    """
-    # 1) JSON 직렬화
-    json_str = json.dumps(data)
-    byte_data = json_str.encode('utf-8')
-    
-    # 2) zlib 압축 (level=9는 최대 압축)
-    compressed_data = zlib.compress(byte_data, level=9)
-    
-    # 3) 크기 비교 로그 (압축률 확인용)
-    original_size = len(byte_data)
-    compressed_size = len(compressed_data)
-    
-    if original_size > 0:
-        compression_ratio = (1 - (compressed_size / original_size)) * 100
-    else:
-        compression_ratio = 0.0
-    
-    print("[compress_data] 원본 크기 :", original_size, "bytes")
-    print("[compress_data] 압축 후 크기 :", compressed_size, "bytes")
-    print("[compress_data] 압축률 : {:.2f}%".format(compression_ratio))
-    
-    return compressed_data
+# ────────── 직렬화 ──────────
+_FMT = "<Ihhhhhhhhhff"            # 4+18+8 = 30 B → zlib 압축 후 18~22 B
+_FIELDS = (
+    ("ts",        1),             # uint32  (s)
+    ("accel.ax",  1000),          # int16   (0.001 g)
+    ("accel.ay",  1000),
+    ("accel.az",  1000),
+    ("gyro.gx",   10),            # int16   (0.1 °/s)
+    ("gyro.gy",   10),
+    ("gyro.gz",   10),
+    ("angle.roll", 10),           # int16   (0.1 °)
+    ("angle.pitch",10),
+    ("angle.yaw", 10),
+    ("gps.lat",   1.0),           # float32 (°)
+    ("gps.lon",   1.0),
+)
+
+def _extract(src: Dict[str, Any], dotted: str):
+    """``"gyro.gx"`` 같은 경로를 따라 값 추출"""
+    parts = dotted.split('.')
+    v = src
+    for p in parts:
+        v = v[p]
+    return v
+
+def compress_data(data: Dict[str, Any]) -> bytes:
+    """센서 dict → struct(30 B) → zlib(level 9)"""
+    packed = struct.pack(
+        _FMT,
+        int(data["ts"]),
+        *[int(_extract(data, k) * scale) if isinstance(scale, int)
+          else float(_extract(data, k)) for k, scale in _FIELDS[1:]]
+    )
+    return zlib.compress(packed, level=9)
+
+# ────────── 패킷화 ──────────
+MAX_PAYLOAD = 56                  # 58(LoRa) - 2(헤더)
+
+def split_into_packets(data: bytes, max_size: int = MAX_PAYLOAD) -> List[Dict]:
+    if max_size <= 0:
+        raise ValueError("max_size must be > 0")
+    total = math.ceil(len(data) / max_size)
+    return [
+        {"seq": i + 1, "total": total, "payload": data[i*max_size:(i+1)*max_size]}
+        for i in range(total)
+    ]

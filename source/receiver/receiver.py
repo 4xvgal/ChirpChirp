@@ -1,27 +1,19 @@
-
-# ------------------------------------------------------------
-# ㆍ패킷 손실률(loss_pct)   ㆍ지연(latency_ms)   ㆍ지터(jitter_ms)
-# ㆍlink_score(0~100)       ㆍ원본 바이트(bytes)
-# ㆍ총 수신 바이트(total_bytes) ㆍ평균 패킷 크기(avg_pkt)
-# ㆍ패킷 크기² 평균(avg_pkt2)
-# ------------------------------------------------------------
+# -*- coding: utf-8 -*-
 from __future__ import annotations
 import os, time, json, datetime, statistics, serial
-from packet_reassembler import (
-    PacketReassembler, PacketFormatError, PacketReassemblyError
-)
+
+from packet_reassembler import PacketReassembler, PacketReassemblyError
 import decoder
 
-SERIAL_PORT = '/dev/serial0'
-BAUD_RATE   = 9600
-TIMEOUT     = 1
+PORT       = "/dev/serial0"
+BAUD       = 9600
+TIMEOUT_RX = 0.1           # 짧은 바이너리 프레임용
+FRAME_MAX  = 58            # 2B 헤더 + 56B payload
 
-SYN_MSG = "SYN"
-ACK_MSG = "ACK"
+SYN_MSG = b"SYN\r\n"
+ACK_MSG = b"ACK\n"
 
-DATA_DIR = "data/raw"
-os.makedirs(DATA_DIR, exist_ok=True)
-
+DATA_DIR = "data/raw"; os.makedirs(DATA_DIR, exist_ok=True)
 
 def _log_json(payload: dict, meta: dict):
     fn = datetime.datetime.now().strftime("%Y-%m-%d") + ".jsonl"
@@ -33,114 +25,79 @@ def _log_json(payload: dict, meta: dict):
             "meta": meta
         }, ensure_ascii=False) + "\n")
 
-def _link_score(loss_pct: float, latency_ms: int, jitter_ms: float) -> int:
-    """간단 스코어: 100 – 손실(%) – 지연/10 – 지터/10 (0~100)"""
-    score = 100 - loss_pct - latency_ms/10 - jitter_ms/10
-    return int(max(0, min(100, score)))
-
 def receive_loop():
-    ser   = serial.Serial(SERIAL_PORT, BAUD_RATE, timeout=TIMEOUT)
+    ser   = serial.Serial(PORT, BAUD, timeout=TIMEOUT_RX)
     reasm = PacketReassembler()
 
-    cur_id: int | None = None
     expect = recv = 0
-    first_t: float | None = None
-
-    pkt_sizes: list[int] = []
-    inter_arrival: list[float] = []
-    last_pkt_time: float | None = None
+    inter  : list[float] = []
+    last_t = first_t = None
     total_bytes = 0
+    pkt_sizes: list[int] = []
 
-    print(f"[{datetime.datetime.now():%F %T}] Receiver start {SERIAL_PORT}@{BAUD_RATE}")
+    print(f"[{datetime.datetime.now():%F %T}] Receiver start {PORT}@{BAUD}")
 
     try:
-        last_print = time.time()
         while True:
+            # ─── SYN/ACK (ASCII) ───
+            if ser.in_waiting and ser.peek(1)[:1] == b'S':
+                line = ser.readline()
+                if line.strip() == b"SYN":
+                    ser.write(ACK_MSG)
+                continue
+
+            # ─── 바이너리 프레임 ───
             if ser.in_waiting:
-                raw = ser.readline()
-                if not raw:
+                frame = ser.read(ser.in_waiting)   # LoRa 모듈은 프레임 단위로 UART 출력
+                if not frame:
                     continue
-                try:
-                    line = raw.decode('utf-8', errors='ignore').strip()
-                    if not line:
-                        continue
-                except UnicodeDecodeError:
-                    continue
+                if len(frame) > FRAME_MAX or len(frame) < 3:
+                    continue                       # 잘못된 길이
 
-                # SYN 핸드셰이크
-                if line == SYN_MSG:
-                    ser.write((ACK_MSG + "\n").encode())
-                    last_print = time.time()
-                    continue
-
-                # 첫 패킷 → 메시지 메타 초기화
-                try:
-                    hdr = json.loads(line)
-                    if isinstance(hdr, dict) and hdr.get("seq") == 1:
-                        cur_id  = hdr.get("id")
-                        expect  = hdr.get("total", 0)
-                        recv    = 0
-                        first_t = time.time()
-                        pkt_sizes.clear()
-                        inter_arrival.clear()
-                        total_bytes = 0
-                        last_pkt_time = None
-                except json.JSONDecodeError:
-                    pass
-
-                # 인터벌·패킷 크기 기록
+                # 통계용
                 now = time.time()
-                if last_pkt_time is not None:
-                    inter_arrival.append((now - last_pkt_time)*1000)  # ms
-                last_pkt_time = now
-                pkt_sizes.append(len(line))
-                total_bytes += len(line)
-                recv += 1
+                if last_t is not None:
+                    inter.append((now - last_t) * 1000)
+                last_t = now
+                pkt_sizes.append(len(frame))
+                total_bytes += len(frame)
 
-                ts = datetime.datetime.now().strftime("%H:%M:%S.%f")[:-3]
                 try:
-                    assembled = reasm.process_line(line)
-                    if assembled is None:
-                        continue
+                    data_blob = reasm.process_frame(frame)
+                    if data_blob is None:
+                        continue  # 아직 다 안 모임
 
-                    latency_ms = int((time.time() - first_t)*1000) if first_t else 0
-                    loss_pct   = (expect - recv) / expect * 100 if expect else 0
-                    jitter_ms  = statistics.pstdev(inter_arrival) if len(inter_arrival) > 1 else 0.0
+                    # ─── 복원 성공 ───
+                    payload = decoder.decompress_data(data_blob)
+                    if payload is None:
+                        print("[decoder] FAIL"); continue
+
+                    loss_pct = (reasm._total - recv) / reasm._total * 100 if reasm._total else 0
                     meta = {
-                        "bytes": len(assembled),
-                        "pkts_expected": expect,
-                        "pkts_recv": recv,
-                        "missing": max(expect - recv, 0),
-                        "latency_ms": latency_ms,
+                        "bytes": len(data_blob),
+                        "latency_ms": int((now - first_t)*1000) if first_t else 0,
                         "loss_pct": round(loss_pct, 2),
-                        "jitter_ms": round(jitter_ms, 2),
-                        "link_score": _link_score(loss_pct, latency_ms, jitter_ms),
+                        "jitter_ms": round(statistics.pstdev(inter), 2) if len(inter) > 1 else 0,
                         "total_bytes": total_bytes,
                         "avg_pkt": round(sum(pkt_sizes)/len(pkt_sizes), 2),
-                        "avg_pkt2": round(sum(x*x for x in pkt_sizes)/len(pkt_sizes), 2)
+                        "avg_pkt2": round(sum(x*x for x in pkt_sizes)/len(pkt_sizes), 2),
                     }
-                   
+                    print(f"[{datetime.datetime.now():%H:%M:%S.%f} OK] "
+                          f"{meta['bytes']}B, loss {meta['loss_pct']}%, "
+                          f"lat {meta['latency_ms']} ms")
+                    _log_json(payload, meta)
 
-                    payload = decoder.decompress_data(assembled)
-                    if payload:
-                        print(f"[{ts}] OK score={meta['link_score']} "
-                              f"loss={meta['loss_pct']:.1f}% "
-                              f"lat={latency_ms}ms jit={meta['jitter_ms']:.1f}ms")
-                        _log_json(payload, meta)
-                        ser.write(f"ACK:{cur_id}\n".encode())
-                    else:
-                        print(f"[{ts}] Decoder FAIL")
-                        ser.write(f"NAK:{cur_id}\n".encode())
-                    last_print = time.time()
+                    # 새 메시지 통계 초기화
+                    expect = recv = 0
+                    inter.clear(); pkt_sizes.clear()
+                    first_t = last_t = None
+                    total_bytes = 0
 
-                except (PacketFormatError, PacketReassemblyError) as e:
-                    print(f"[{ts}] ERR – {e}")
-                    ser.write(f"NAK:{cur_id}\n".encode())
+                except PacketReassemblyError as e:
+                    print(f"[ERR] {e}")
+                    reasm.reset()
 
             else:
-                if time.time() - last_print > 5:
-                    print(f"[{datetime.datetime.now():%F %T}] waiting …")
-                    last_print = time.time()
                 time.sleep(0.01)
 
     except KeyboardInterrupt:
