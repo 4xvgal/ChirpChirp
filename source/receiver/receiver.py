@@ -1,17 +1,20 @@
 # -*- coding: utf-8 -*-
 """
-receiver.py – 2 B 헤더 + payload 프레임 수신
-· 프레임은 LF('\n')로 구분됨
+receiver.py – LEN‑SEQ‑TOTAL‑PAYLOAD 수신
 """
 from __future__ import annotations
 import os, time, json, datetime, statistics, serial
+from collections import deque
+
 from packet_reassembler import PacketReassembler, PacketReassemblyError
 import decoder
 
 PORT        = "/dev/serial0"
 BAUD        = 9600
-TIMEOUT_RX  = 0.1
-FRAME_MAX   = 58               # 2B 헤더 + 56B payload
+TIMEOUT_RX  = 0.05
+
+FRAME_MAX   = 58        # 2B 헤더 + 56B payload
+LEN_MAX     = FRAME_MAX
 
 SYN   = b"SYN"
 ACK   = b"ACK\n"
@@ -32,72 +35,89 @@ def receive_loop():
     ser   = serial.Serial(PORT, BAUD, timeout=TIMEOUT_RX)
     reasm = PacketReassembler()
 
-    inter: list[float] = []
+    buf   = deque()                 # 직렬 수신 버퍼
     pkt_sizes: list[int] = []
-    total_bytes = 0
+    inter: list[float] = []
+
     first_t = last_t = None
+    total_bytes = 0
 
     print(f"[{datetime.datetime.now():%F %T}] Receiver start {PORT}@{BAUD}")
 
     try:
+        handshake_done = False
         while True:
-            raw = ser.readline()              # LF 기준
-            if not raw:
-                time.sleep(0.01); continue
+            # ── 읽어 들이기 ──
+            chunk = ser.read(ser.in_waiting or 1)
+            if chunk:
+                buf.extend(chunk)
 
-            # ── SYN/ACK ──
-            if raw.strip() == SYN:
-                ser.write(ACK)
+            # ── 핸드셰이크 처리 ──
+            if not handshake_done:
+                if b"SYN" in bytes(buf):
+                    ser.readline()          # SYN\r\n 소거
+                    ser.write(ACK)
+                    handshake_done = True
+                    buf.clear()
                 continue
 
-            frame = raw.rstrip(b"\r\n")       # LF 제거
-            if len(frame) < 3 or len(frame) > FRAME_MAX:
-                continue                      # 길이 오류
+            # ── LEN 기반 프레임 파싱 ──
+            while True:
+                if len(buf) < 1:
+                    break
+                frame_len = buf[0]
+                if frame_len == 0 or frame_len > LEN_MAX:
+                    buf.popleft(); continue   # 잘못된 LEN, 버림
+                if len(buf) < 1 + frame_len:
+                    break                     # 아직 다 안 옴
+                buf.popleft()                 # LEN 바이트 삭제
+                frame = bytes(buf.popleft() for _ in range(frame_len))
 
-            now = time.time()
-            if last_t is not None:
-                inter.append((now - last_t) * 1000)  # ms
-            last_t = now
-            pkt_sizes.append(len(frame))
-            total_bytes += len(frame)
+                now = time.time()
+                if last_t is not None:
+                    inter.append((now - last_t) * 1000)
+                last_t = now
+                pkt_sizes.append(frame_len + 1)   # LEN 포함
+                total_bytes += frame_len + 1
 
-            try:
-                blob = reasm.process_frame(frame)
-                if blob is None:
-                    continue  # 아직 미완
+                try:
+                    blob = reasm.process_frame(frame)
+                    if blob is None:
+                        continue
 
-                payload = decoder.decompress_data(blob)
-                if payload is None:
-                    print("[decoder] FAIL"); continue
+                    payload = decoder.decompress_data(blob)
+                    if payload is None:
+                        print("[decoder] FAIL"); continue
 
-                jitter   = statistics.pstdev(inter) if len(inter) > 1 else 0.0
-                latency  = int((now - first_t)*1000) if first_t else 0
-                meta = {
-                    "bytes": len(blob),
-                    "latency_ms": latency,
-                    "jitter_ms": round(jitter, 2),
-                    "total_bytes": total_bytes,
-                    "avg_pkt": round(sum(pkt_sizes)/len(pkt_sizes), 2),
-                    "avg_pkt2": round(sum(x*x for x in pkt_sizes)/len(pkt_sizes), 2),
-                }
-                print(f"[{datetime.datetime.now():%H:%M:%S.%f} OK] "
-                      f"{meta['bytes']}B, lat {latency} ms, jit {meta['jitter_ms']} ms")
-                _log_json(payload, meta)
+                    jitter = statistics.pstdev(inter) if len(inter) > 1 else 0.0
+                    latency = int((now - first_t)*1000) if first_t else 0
+                    meta = {
+                        "bytes": len(blob),
+                        "latency_ms": latency,
+                        "jitter_ms": round(jitter, 2),
+                        "total_bytes": total_bytes,
+                        "avg_pkt": round(sum(pkt_sizes)/len(pkt_sizes), 2),
+                    }
+                    print(f"[{datetime.datetime.now():%H:%M:%S.%f} OK] "
+                          f"{meta['bytes']}B, lat {latency}ms, jit {meta['jitter_ms']}ms")
+                    _log_json(payload, meta)
 
-                # 새 메시지 통계 초기화
-                inter.clear(); pkt_sizes.clear()
-                total_bytes = 0
-                first_t = last_t = None
+                    # 통계 리셋
+                    pkt_sizes.clear(); inter.clear()
+                    total_bytes = 0
+                    first_t = last_t = None
 
-            except PacketReassemblyError as e:
-                print(f"[ERR] {e}")
-                reasm.reset()
-                inter.clear(); pkt_sizes.clear()
-                total_bytes = 0
-                first_t = last_t = None
+                except PacketReassemblyError as e:
+                    print(f"[ERR] {e}")
+                    reasm.reset()
+                    pkt_sizes.clear(); inter.clear()
+                    total_bytes = 0
+                    first_t = last_t = None
 
-            if first_t is None:
-                first_t = now
+                if first_t is None:
+                    first_t = now
+
+            time.sleep(0.01)
 
     except KeyboardInterrupt:
         pass
