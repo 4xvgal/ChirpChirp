@@ -1,150 +1,194 @@
-# receiver.py (모듈)
-import serial
-import time
-import datetime
-# PacketReassembler 클래스와 예외 클래스를 임포트한다고 가정
-from packet_reassembler import PacketReassembler, PacketFormatError, PacketReassemblyError
-import decoder            # 사용자 정의 모듈: 압축 해제 및 데이터 복원 기능 수행
+# receiver.py
+# -*- coding: utf-8 -*-
+"""
+LoRa 리시버
+1) 프로그램 시작 시 SYN 한 줄(readline) 기다림 → ACK 한 번 보냄
+2) 그 뒤 LEN-SEQ-TOTAL-PAYLOAD 스트림을 끊김 없이 처리
+"""
+from __future__ import annotations
+import os, time, json, datetime, statistics, serial # json, datetime 추가 확인
+from collections import deque
 
-# 모듈 레벨 상수 (외부에서 변경 가능하게 하려면 다른 방식 고려)
-SERIAL_PORT = '/dev/ttyS0'
-BAUD_RATE = 9600
-DEFAULT_TIMEOUT = 1 # 시리얼 읽기 타임아웃 기본값
+# packet_reassembler.py와 decoder.py가 같은 디렉토리에 있다고 가정
+try:
+    from packet_reassembler import PacketReassembler, PacketReassemblyError
+    import decoder
+except ImportError as e:
+    print(f"모듈 임포트 실패: {e}. packet_reassembler.py와 decoder.py가 올바른 위치에 있는지 확인하세요.")
+    exit(1)
 
-# --- 핵심 수신 및 처리 함수 ---
-def receive_loop(port=SERIAL_PORT, baud=BAUD_RATE, serial_timeout=DEFAULT_TIMEOUT):
-    """
 
-    Args:
-        port (str): 사용할 시리얼 포트 경로.
-        baud (int): 통신 속도 (Baud rate).
-        serial_timeout (int/float): 시리얼 포트 읽기 타임아웃 (초).
+# ────────── 설정 ──────────
+PORT         = "/dev/serial0"
+BAUD         = 9600
+HANDSHAKE_TO = 5.0
+READ_TO      = 0.05
+FRAME_MAX    = 58
+DATA_DIR     = "data/raw"
+os.makedirs(DATA_DIR, exist_ok=True)
 
-    Returns:
-        object: 성공적으로 복원된 센서 데이터 객체.
-        None: 메시지 수신/처리 실패 또는 타임아웃 발생 시.
-               (KeyboardInterrupt 등 외부 요인 제외)
-    
-    receiver -> ressembler -> receiver -> decoder
+SYN = b"SYN\n"
+ACK = b"ACK\n"
 
-    """
-    start_time = time.time()
-    reassembler = PacketReassembler() 
-    final_sensor_data = None
+import logging
+logging.basicConfig(level=logging.INFO,
+                    format="%(asctime)s - %(levelname)s - %(message)s")
 
-    # 이 함수가 호출될 때마다 로그 출력 (모듈 사용자에게 정보 제공)
-    print(f"[{datetime.datetime.now():%Y-%m-%d %H:%M:%S}] Receiver: 시작됨 ({port}, {baud} baud)")
-    print(f"[{datetime.datetime.now():%Y-%m-%d %H:%M:%S}] Receiver: 데이터 수신 대기 중...")
 
-    ser = None
+def _log_json(payload: dict, meta: dict):
+    fn = datetime.datetime.now().strftime("%Y-%m-%d") + ".jsonl"
+    with open(os.path.join(DATA_DIR, fn), "a", encoding="utf-8") as fp:
+        fp.write(json.dumps({
+            "ts": datetime.datetime.utcnow().isoformat(timespec="milliseconds")+"Z",
+            "data": payload,
+            "meta": meta
+        }, ensure_ascii=False) + "\n")
+
+def receive_loop():
     try:
-        ser = serial.Serial(port, baud, timeout=serial_timeout)
-        time.sleep(1) # 포트 안정화 대기
-
-        # TODO: 무한정 대기 대신 타임아웃 로직 추가 고려
-        # 예를 들어, 전체 메시지 수신에 대한 타임아웃 설정 가능
-        # message_timeout = 30 # 초
-        # message_start_time = time.time()
-
-        while True: 
-
-            try:
-                if ser.in_waiting > 0:
-                    line_bytes = ser.readline()
-                    if not line_bytes: # 타임아웃 또는 빈 데이터
-                        # 타임아웃이 자주 발생하면 문제일 수 있으므로, 필요시 로깅 또는 처리 추가
-                        continue
-
-                    try:
-                        line = line_bytes.decode('utf-8', errors='ignore').strip() 
-                        if not line:
-                            continue
-
-                    except UnicodeDecodeError as ude:
-                        timestamp = datetime.datetime.now().strftime('%Y-%m-%d %H:%M:%S.%f')[:-3]
-                        print(f"[{timestamp}] Receiver: 오류 - 데이터 디코딩 실패 - {ude}")
-                        continue
-
-                    timestamp = datetime.datetime.now().strftime('%Y-%m-%d %H:%M:%S.%f')[:-3]
-
-                    try:
-
-                        # packet_ressembler.py 
-                        reassembled_data = reassembler.process_line(line) 
-
-                        if reassembled_data is not None: ## 재조립된 데이터가 있는 경우
-
-
-                            print(f"[{timestamp}] Receiver: 재조립 완료 (Reassembler) - {len(reassembled_data)} bytes")
-                            print("[DEBUG] header bytes:", reassembled_data[:2].hex())
-                            
-                            # decoder.py
-                            sensor_data = decoder.decompress_data(reassembled_data)
-
-                            if sensor_data is None:
-                                print(f"[{timestamp}] Receiver: 오류 - 데이터 복원 실패 (Decoder)")
-                            else:
-                                print(f"[{timestamp}] Receiver: 압축 해제 완료 (Decoder) - 센서 데이터 복원됨.")
-                                final_sensor_data = sensor_data
-
-
-                            # 메시지 처리 완료, 루프 및 함수 종료
-                            return final_sensor_data
-
-                    except PacketFormatError as pfe:
-                        print(f"[{timestamp}] Receiver: 오류 - 잘못된 패킷 형식 - {pfe}")
-                        
-                    except PacketReassemblyError as pre:
-                        print(f"[{timestamp}] Receiver: 오류 - 재조립 중 문제 - {pre}")
-
-                    except Exception as process_err:
-                        print(f"[{timestamp}] Receiver: 오류 - 데이터 처리 중 - {process_err}")
-
-                else:
-                    # 읽을 데이터가 없을 때 CPU 사용 방지
-                    time.sleep(0.01)
-
-
-            except Exception as loop_err:
-                # 루프 내 예상치 못한 오류 (예: Reassembler 내부 오류 등)
-                print(f"\n[{datetime.datetime.now():%Y-%m-%d %H:%M:%S}] Receiver: 오류 - 수신 루프 중 오류 발생: {loop_err}")
-                time.sleep(0.1) # 잠시 대기 후 계속 시도? 또는 루프 종료 결정 필요
-
+        ser = serial.Serial(PORT, BAUD, timeout=HANDSHAKE_TO)
+        logging.info(f"Receiver start {PORT}@{BAUD}")
     except serial.SerialException as e:
-        print(f"\n[{datetime.datetime.now():%Y-%m-%d %H:%M:%S}] Receiver: 시리얼 오류 - 포트({port}) 문제: {e}")
-        return None # 시리얼 오류 시 None 반환
+        logging.error(f"시리얼 포트 {PORT}를 열 수 없습니다: {e}")
+        return
+
+    # ... (핸드셰이크 로직은 변경 없음) ...
+    handshake_successful = False
+    while not handshake_successful:
+        logging.info(f"SYN 대기 중... (기대: {SYN!r})")
+        line = ser.readline()
+        if not line:
+            logging.debug("SYN 대기 타임아웃, 재시도...")
+            continue
+        logging.info(f"핸드셰이크 데이터 수신: {line!r}")
+        if line == SYN:
+            logging.info(f"SYN 수신 확인. ACK 전송: {ACK!r}")
+            ser.write(ACK)
+            ser.flush()
+            logging.info("핸드셰이크 성공 (SYN 수신, ACK 발신)")
+            handshake_successful = True
+        else:
+            logging.warning(f"핸드셰이크 중 예상치 못한 데이터 수신: {line!r} (기대: {SYN!r})")
+    if not handshake_successful:
+        logging.error("핸드셰이크 최종 실패. 종료합니다.")
+        ser.close()
+        return
+
+    ser.timeout = READ_TO
+    buf = deque()
+    reasm = PacketReassembler()
+    inter_arrival: list[float] = []
+    pkt_sizes: list[int] = []
+    total_bytes = 0
+    first_t = last_t = None
+    received_message_count = 0
+
+    try:
+        while True:
+            bytes_to_read = ser.in_waiting or 1
+            chunk = ser.read(bytes_to_read)
+
+            if chunk:
+                buf.extend(chunk)
+                logging.debug(f"데이터 수신: {chunk!r}, 현재 버퍼: {bytes(buf)!r}")
+
+            while len(buf) >= 1:
+                length = buf[0]
+                if length < 3 or length > FRAME_MAX: # LEN + SEQ + TOTAL 최소 3바이트
+                    logging.warning(f"비정상적인 프레임 길이 감지: {length}. 해당 바이트 버림.")
+                    buf.popleft()
+                    reasm.reset()
+                    inter_arrival.clear(); pkt_sizes.clear(); total_bytes = 0; first_t = last_t = None
+                    continue
+                if len(buf) < 1 + length: # LEN 바이트 + 실제 프레임 길이
+                    break
+                
+                buf.popleft() # LEN 바이트 제거
+                frame_bytes = [buf.popleft() for _ in range(length)]
+                frame = bytes(frame_bytes) # SEQ, TOTAL, PAYLOAD 부분
+                logging.debug(f"프레임 추출: LEN={length}, FRAME={frame!r}")
+
+                now = time.time()
+                if last_t is not None:
+                    inter_arrival.append((now - last_t) * 1000)
+                last_t = now
+                pkt_sizes.append(length + 1) # LEN 포함한 전체 프레임 크기
+                total_bytes += length + 1
+                if first_t is None:
+                    first_t = now
+
+                try:
+                    blob = reasm.process_frame(frame) # blob은 압축된 전체 메시지
+                    if blob is None:
+                        logging.debug("프레임 처리: 아직 전체 패킷 아님")
+                        continue
+                    
+                    received_message_count += 1
+                    # logging.info(f"--- 메시지 #{received_message_count} 재조립 완료 (압축된 크기: {len(blob)}B) ---")
+                    
+                    # decoder.py를 통해 압축 해제 및 파싱하여 딕셔너리 생성
+                    payload = decoder.decompress_data(blob)
+                    
+                    if payload is None:
+                        
+                        logging.error(f"[receiver] 메시지 #{received_message_count} 데이터 디코딩 실패 (payload is None)")
+                        reasm.reset(); buf.clear()
+                        inter_arrival.clear(); pkt_sizes.clear(); total_bytes = 0; first_t = last_t = None
+                        continue
+                    
+                    logging.info(f"--- 메시지 #{received_message_count} 수신 데이터 (payload) ---")
+                    
+               
+
+                    ts_value = payload.get('ts', 0.0) 
+                    ts_human_readable = datetime.datetime.fromtimestamp(ts_value).strftime('%Y-%m-%d %H:%M:%S.%f')[:-3]
+                    
+                    accel = payload.get('accel', {})
+                    gyro = payload.get('gyro', {})
+                    angle = payload.get('angle', {})
+                    gps = payload.get('gps', {})
+
+                    display_message = []
+                    display_message.append(f"  Timestamp: {ts_human_readable} (raw: {ts_value:.3f})") # ts도 소수점 표시
+                    display_message.append(f"  Accel (g): Ax={accel.get('ax', 'N/A'):.3f}, Ay={accel.get('ay', 'N/A'):.3f}, Az={accel.get('az', 'N/A'):.3f}")
+                    display_message.append(f"  Gyro (°/s): Gx={gyro.get('gx', 'N/A'):.1f}, Gy={gyro.get('gy', 'N/A'):.1f}, Gz={gyro.get('gz', 'N/A'):.1f}")
+                    display_message.append(f"  Angle (°): Roll={angle.get('roll', 'N/A'):.1f}, Pitch={angle.get('pitch', 'N/A'):.1f}, Yaw={angle.get('yaw', 'N/A'):.1f}")
+                    display_message.append(f"  GPS (°): Lat={gps.get('lat', 'N/A'):.6f}, Lon={gps.get('lon', 'N/A'):.6f}")
+                    logging.info("\n".join(display_message)) # 각 줄을 개행으로 연결하여 출력
+              
+
+                    latency = int((now - first_t) * 1000) if first_t is not None else 0
+                    jitter  = statistics.pstdev(inter_arrival) if len(inter_arrival) > 1 else 0.0
+                    meta = {
+                        "bytes_compressed": len(blob), # 압축된 데이터의 바이트 크기
+                        "latency_ms": latency,
+                        "jitter_ms": round(jitter, 2),
+                        "total_bytes_frames": total_bytes, # 수신된 프레임(LEN+헤더+페이로드)들의 총합
+                        "avg_frame_size": round(sum(pkt_sizes)/len(pkt_sizes), 2) if pkt_sizes else 0,
+                    }
+                    logging.info(f"[{datetime.datetime.now():%H:%M:%S.%f} OK] "
+                                 f"Msg#{received_message_count}: {meta['bytes_compressed']}B compressed, "
+                                 f"lat {latency}ms, jit {meta['jitter_ms']}ms")
+                    _log_json(payload, meta)
+
+                    reasm.reset()
+                    inter_arrival.clear(); pkt_sizes.clear(); total_bytes = 0; first_t = last_t = None
+
+                except PacketReassemblyError as e:
+                    logging.error(f"패킷 재조립 오류: {e}")
+                    reasm.reset(); buf.clear()
+                    inter_arrival.clear(); pkt_sizes.clear(); total_bytes = 0; first_t = last_t = None
+            
+            # time.sleep(0.001)
+
     except KeyboardInterrupt:
-        print(f"\n[{datetime.datetime.now():%Y-%m-%d %H:%M:%S}] Receiver: 사용자에 의해 중단됨.")
-        # KeyboardInterrupt는 호출한 쪽으로 전파되도록 re-raise 하거나 None 반환
-        raise # 또는 return None
+        logging.info("사용자에 의해 중단됨.")
     except Exception as e:
-        print(f"\n[{datetime.datetime.now():%Y-%m-%d %H:%M:%S}] Receiver: 예상치 못한 오류 발생: {e}")
-        return None # 그 외 오류 시 None 반환
+        logging.error(f"예상치 못한 오류 발생: {e}", exc_info=True)
     finally:
-        if ser and ser.is_open:
+        if 'ser' in locals() and ser.is_open:
             ser.close()
-            print(f"[{datetime.datetime.now():%Y-%m-%d %H:%M:%S}] Receiver: 시리얼 포트 닫힘.")
+            logging.info("시리얼 포트 닫힘.")
 
-        elapsed_time = time.time() - start_time
-        status = "성공" if final_sensor_data else "실패 또는 중단"
-        print(f"[{datetime.datetime.now():%Y-%m-%d %H:%M:%S}] Receiver: 종료됨 (상태: {status}, 소요시간: {elapsed_time:.2f} 초)")
-        # 최종 데이터는 return 문에서 반환됨
-
- 
 if __name__ == "__main__":
-    print("="*30)
-    print(" Receiver Module - Direct Test ")
-    print("="*30)
-    print(f"테스트: 시리얼 포트 {SERIAL_PORT}에서 메시지 수신 시도...")
-
-    # 테스트 목적으로 함수 직접 호출
-    result_data = receive_loop(port=SERIAL_PORT, baud=BAUD_RATE)
-
-    if result_data:
-        print("\n[테스트 결과] 데이터 수신 및 복원 성공:")
-        # 실제 데이터 형태에 맞게 출력
-        print(result_data)
-    else:
-        print("\n[테스트 결과] 데이터 수신 또는 복원에 실패했습니다.")
-
-    print("\nReceiver Module 테스트 종료.") 
+    receive_loop()
