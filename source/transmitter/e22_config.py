@@ -8,9 +8,7 @@ WRITE_TIMEOUT  = 2    # 초
 READ_TIMEOUT   = 1    # 초
 
 def init_serial() -> serial.Serial:
-    """
-    E22 모듈용 시리얼 포트를 열고 반환합니다.
-    """
+
     return serial.Serial(
         port=SERIAL_PORT,
         baudrate=BAUD_RATE,
