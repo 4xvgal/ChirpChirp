@@ -42,13 +42,6 @@ def compress_data(data: Dict[str, Any]) -> bytes:
     )
     return zlib.compress(packed, level=9)
 
-# ────────── 패킷화 ──────────
-# LoRa 최대 프레임 크기가 58바이트라고 가정.
-# 데이터 패킷 헤더: LEN(1)은 sender가 붙임.
-# 우리가 packetizer에서 만드는 부분: PKT_ID(1) + SEQ(1) + TOTAL(1) = 3 바이트
-# 따라서, 순수 PAYLOAD_CHUNK가 가질 수 있는 최대 크기는
-# 58 (LoRa 최대) - 1 (LEN) - 3 (PKT_ID+SEQ+TOTAL) = 54 바이트
-# MAX_PAYLOAD_CHUNK = 54 (기존 MAX_PAYLOAD = 56에서 변경)
 MAX_PAYLOAD_CHUNK = 54
 
 def split_into_packets(data: bytes, max_payload_chunk_size: int = MAX_PAYLOAD_CHUNK) -> List[Dict]:
