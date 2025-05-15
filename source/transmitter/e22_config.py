@@ -2,7 +2,7 @@
 import serial
 
 # 변경이 필요한 설정값
-SERIAL_PORT    = '/dev/ttyS0'
+SERIAL_PORT    = '/dev/ttyAMA0'
 BAUD_RATE      = 9600
 WRITE_TIMEOUT  = 2    # 초
 READ_TIMEOUT   = 1    # 초
