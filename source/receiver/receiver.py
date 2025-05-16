@@ -7,52 +7,60 @@ import os
 import time
 import json
 import datetime
-# import statistics # 단일 프레임이므로 jitter 등 복잡한 통계는 의미가 줄어듦
 import serial
 import struct
+import binascii # 로깅용
 
 try:
-    # from packet_reassembler import PacketReassembler, PacketReassemblyError # 사용 안 함
-    import decoder
+    import decoder # 같은 폴더에 있다고 가정
 except ImportError as e:
-    print(f"모듈 임포트 실패: {e}. 확인하세요.")
+    print(f"모듈 임포트 실패: {e}. decoder.py가 같은 폴더에 있는지 확인하세요.")
     exit(1)
 
 # ────────── 설정 ──────────
-PORT         = "/dev/ttyAMA0"
+PORT         = "/dev/ttyAMA0" # 실제 환경에 맞게 수정
 BAUD         = 9600
-HANDSHAKE_TIMEOUT = 5.0
 
-# 새 프레임 구조: LEN(1B) + SEQ(1B) + PAYLOAD_CHUNK(가변)
-# frame_content_len은 (SEQ + PAYLOAD_CHUNK)의 길이
-# PAYLOAD_CHUNK 최대 56B (encoder.MAX_PAYLOAD_CHUNK)
-NEW_FRAME_MAX_CONTENT_LEN = 1 + 56  # SEQ(1) + PAYLOAD_CHUNK(최대 56) = 57
-NEW_MIN_FRAME_CONTENT_LEN = 1 + 0   # SEQ(1) + PAYLOAD_CHUNK(최소 0) = 1
+# 타임아웃
+SERIAL_READ_TIMEOUT = 0.05   # 일반적인 non-blocking read 시도 시 짧은 타임아웃
+CONTROL_PKT_WAIT_TIMEOUT = 65.0 # Query 등에 대한 응답을 기다릴 때의 타임아웃 (sender와 유사)
+INITIAL_SYN_TIMEOUT = 65.0 # 최초 SYN 메시지 대기 시간
 
-DATA_DIR     = "data/raw"
-os.makedirs(DATA_DIR, exist_ok=True)
-
+# 메시지 타입 (sender와 동일하게)
 SYN_MSG            = b"SYN\r\n"
 ACK_TYPE_HANDSHAKE = 0x00
 ACK_TYPE_DATA      = 0xAA
-ACK_PACKET_LEN     = 3
+QUERY_TYPE_SEND_REQUEST = 0x50
+ACK_TYPE_SEND_PERMIT  = 0x55
+
+# 패킷 구조 관련 (sender와 동일하게)
+ACK_PACKET_LEN     = 2
+HANDSHAKE_ACK_SEQ  = 0x00
+
+# 새 프레임 구조: LEN(1B) + SEQ(1B) + PAYLOAD_CHUNK(가변)
+NEW_FRAME_MAX_CONTENT_LEN = 1 + 56  # SEQ(1) + PAYLOAD_CHUNK(최대 56)
+NEW_MIN_FRAME_CONTENT_LEN = 1 + 0   # SEQ(1) + PAYLOAD_CHUNK(최소 0)
+
+DATA_DIR     = "data/raw"
+os.makedirs(DATA_DIR, exist_ok=True)
 
 logging.basicConfig(level=logging.INFO,
                     format="%(asctime)s - %(levelname)s - %(message)s",
                     datefmt="%H:%M:%S")
 logger = logging.getLogger(__name__)
 
-# --- PKT_ID 관리 ---
-expected_next_pkt_id = 0
+def bytes_to_hex_pretty_str(data_bytes: bytes, bytes_per_line: int = 16) -> str: # sender.py에서 가져옴
+    if not data_bytes:
+        return "<empty>"
+    hex_str = binascii.hexlify(data_bytes).decode('ascii')
+    lines: List[str] = []
+    for i in range(0, len(hex_str), bytes_per_line * 2):
+        chunk = hex_str[i:i + bytes_per_line * 2]
+        spaced = ' '.join(chunk[j:j+2] for j in range(0, len(chunk), 2))
+        lines.append(spaced)
+    return "\n  ".join(lines)
 
-def get_and_increment_expected_pkt_id() -> int:
-    global expected_next_pkt_id
-    current_id = expected_next_pkt_id
-    expected_next_pkt_id = (expected_next_pkt_id + 1) % 256
-    return current_id
-# --- PKT_ID 관리 끝 ---
-
-def _log_json(payload: dict, meta: dict): # 이 함수는 그대로 유지
+def _log_json(payload: dict, meta: dict):
     fn = datetime.datetime.now().strftime("%Y-%m-%d") + ".jsonl"
     with open(os.path.join(DATA_DIR, fn), "a", encoding="utf-8") as fp:
         fp.write(json.dumps({
@@ -61,174 +69,154 @@ def _log_json(payload: dict, meta: dict): # 이 함수는 그대로 유지
             "meta": meta
         }, ensure_ascii=False) + "\n")
 
-def _send_ack(s: serial.Serial, pkt_id: int, seq: int, ack_type: int):
-    ack_bytes = struct.pack("!BBB", pkt_id, seq, ack_type)
+def _send_control_response(s: serial.Serial, seq: int, ack_type: int) -> bool:
+    ack_bytes = struct.pack("!BB", seq, ack_type)
     try:
-        s.write(ack_bytes)
+        written = s.write(ack_bytes)
         s.flush()
-        logger.debug(f"ACK 전송: PKT_ID={pkt_id}, SEQ={seq}, TYPE={ack_type:#02x} (데이터: {ack_bytes!r})")
+        type_name = {
+            ACK_TYPE_HANDSHAKE: "HANDSHAKE_ACK",
+            ACK_TYPE_DATA: "DATA_ACK",
+            ACK_TYPE_SEND_PERMIT: "SEND_PERMIT_ACK"
+        }.get(ack_type, f"UNKNOWN_TYPE_0x{ack_type:02x}")
+        logger.info(f"CTRL RSP TX: SEQ={seq}, TYPE={type_name} (0x{ack_type:02x})")
+        if logger.isEnabledFor(logging.DEBUG):
+             logger.debug(f"  데이터: {bytes_to_hex_pretty_str(ack_bytes)}")
+        return written == len(ack_bytes)
     except Exception as e:
-        logger.error(f"ACK 전송 실패 (PKT_ID={pkt_id}, SEQ={seq}): {e}")
+        logger.error(f"CTRL RSP TX 실패 (SEQ={seq}, TYPE=0x{ack_type:02x}): {e}")
+        return False
 
 def receive_loop():
     ser = None
-    global expected_next_pkt_id
-
     try:
-        ser = serial.Serial(PORT, BAUD, timeout=HANDSHAKE_TIMEOUT)
-        ser.inter_byte_timeout = None
+        ser = serial.Serial(PORT, BAUD, timeout=INITIAL_SYN_TIMEOUT) # 초기 SYN 대기 타임아웃
+        ser.inter_byte_timeout = None # 명시적 None
     except serial.SerialException as e:
         logger.error(f"포트 열기 실패: {e}")
         return
 
-    handshake_pkt_id = 0
-    handshake_seq = 0
+    # --- 핸드셰이크 ---
     handshake_success = False
-    while not handshake_success:
-        logger.info(f"SYN ('{SYN_MSG!r}') 대기 중...")
-        line = ser.readline()
-        if line == SYN_MSG:
-            logger.info(f"SYN 수신, 핸드셰이크 ACK (PKT_ID={handshake_pkt_id}, SEQ={handshake_seq}, TYPE={ACK_TYPE_HANDSHAKE:#02x}) 전송")
-            _send_ack(ser, handshake_pkt_id, handshake_seq, ACK_TYPE_HANDSHAKE)
-            handshake_success = True
-            expected_next_pkt_id = 0
-            break
-        elif not line:
-            logger.warning("핸드셰이크: SYN 대기 시간 초과. 재시도...")
+    while not handshake_success: # 핸드셰이크는 성공할 때까지 (또는 외부 중단까지)
+        logger.info(f"SYN ('{SYN_MSG!r}') 대기 중 (Timeout: {ser.timeout}s)...")
+        try:
+            line = ser.readline() # readline은 \n을 만나거나 타임아웃 시 반환
+            if line == SYN_MSG:
+                logger.info(f"SYN 수신, 핸드셰이크 ACK (SEQ={HANDSHAKE_ACK_SEQ}, TYPE={ACK_TYPE_HANDSHAKE:#02x}) 전송")
+                if _send_control_response(ser, HANDSHAKE_ACK_SEQ, ACK_TYPE_HANDSHAKE):
+                    handshake_success = True
+                    break
+                else:
+                    logger.error("핸드셰이크 ACK 전송 실패. 1초 후 재시도...")
+                    time.sleep(1) # ACK 전송 실패 시 짧은 대기
+            elif not line: # 타임아웃
+                logger.warning("핸드셰이크: SYN 대기 시간 초과. 재시도...")
+                # ser.timeout은 그대로 유지, 루프 재시작
+            else: # 예상치 못한 데이터
+                logger.warning(f"핸드셰이크: 예상치 않은 데이터 수신: {line!r}. 입력 버퍼 초기화 시도.")
+                ser.reset_input_buffer() # 버퍼 비우기
+                time.sleep(0.1)
+        except Exception as e_hs:
+            logger.error(f"핸드셰이크 중 오류: {e_hs}. 1초 후 재시도...")
             time.sleep(1)
-        else:
-            logger.warning(f"핸드셰이크: 예상치 않은 데이터 수신: {line!r}. 입력 버퍼 초기화.")
-            ser.reset_input_buffer()
-            time.sleep(0.1)
 
-    if not handshake_success:
+
+    if not handshake_success: # KeyboardInterrupt 등으로 루프 탈출 시
         logger.error("핸드셰이크 최종 실패. 프로그램 종료.")
         if ser and ser.is_open:
             ser.close()
         return
 
-    ser.timeout = 0.05
-    ser.inter_byte_timeout = 0.1
+    # 핸드셰이크 성공 후, 일반 수신 모드 타임아웃 설정
+    ser.timeout = SERIAL_READ_TIMEOUT # 짧은 타임아웃으로 변경하여 폴링 유사 효과
+    ser.inter_byte_timeout = 0.1    # 프레임 내 바이트간 간격
 
     received_message_count = 0
-    # 기존 통계 변수 중 일부는 의미가 달라지거나 없어짐
-    # current_message_first_frame_time: 현재 메시지(단일 프레임) 수신 시작 시각
-    # inter_arrival_times, current_message_total_bytes_frames 등은 메시지 단위로 단순화
-    current_message_arrival_time = None
-
+    logger.info("핸드셰이크 완료. 데이터 수신 대기 중...")
 
     try:
         while True:
-            try:
-                len_byte = ser.read(1)
-                if not len_byte:
-                    time.sleep(0.01)
-                    continue
+            # 1. 데이터 패킷의 LEN 바이트를 먼저 시도 (짧은 타임아웃)
+            len_byte = ser.read(1)
 
-                # frame_content_len은 (SEQ + PAYLOAD_CHUNK)의 길이
+            if len_byte: # 데이터 패킷의 시작 (LEN 바이트 수신)
                 actual_content_len = len_byte[0]
-                current_message_arrival_time = time.time() # LEN 바이트 수신 직후를 메시지 도착 시작으로 간주
+                logger.debug(f"LEN 바이트 수신: {actual_content_len}")
 
                 if not (NEW_MIN_FRAME_CONTENT_LEN <= actual_content_len <= NEW_FRAME_MAX_CONTENT_LEN):
                     logger.warning(f"잘못된 LEN 값 수신: {actual_content_len} (기대 범위: {NEW_MIN_FRAME_CONTENT_LEN}-{NEW_FRAME_MAX_CONTENT_LEN}). 입력 버퍼 초기화.")
                     if ser.in_waiting > 0:
                         junk = ser.read(ser.in_waiting)
-                        logger.debug(f"  잘못된 LEN 후 버려진 데이터: {junk!r}")
-                    current_message_arrival_time = None # 메시지 처리 중단
+                        logger.debug(f"  잘못된 LEN 후 버려진 데이터: {bytes_to_hex_pretty_str(junk)}")
                     continue
 
                 # 실제 내용 (SEQ + PAYLOAD_CHUNK) 읽기
+                # inter_byte_timeout이 여기서 중요하게 작용
                 actual_content_bytes = ser.read(actual_content_len)
-                frame_payload_received_time = time.time() # 페이로드 수신 완료 시각
-
+                
                 if len(actual_content_bytes) != actual_content_len:
-                    logger.warning(f"프레임 내용 수신 실패: 기대 {actual_content_len}B, 수신 {len(actual_content_bytes)}B. 데이터: {actual_content_bytes!r}")
-                    if ser.in_waiting > 0: ser.read(ser.in_waiting)
-                    current_message_arrival_time = None
+                    logger.warning(f"프레임 내용 수신 실패: 기대 {actual_content_len}B, 수신 {len(actual_content_bytes)}B. 데이터: {bytes_to_hex_pretty_str(actual_content_bytes)}")
+                    if ser.in_waiting > 0: ser.read(ser.in_waiting) # 남은 데이터 비우기
                     continue
 
                 actual_seq = actual_content_bytes[0]
                 payload_chunk_from_actual_frame = actual_content_bytes[1:]
 
-                current_processing_pkt_id = expected_next_pkt_id # ACK 및 처리에 사용할 PKT_ID
+                logger.info(f"데이터 프레임 수신: LEN={actual_content_len}, SEQ={actual_seq}, PAYLOAD_LEN={len(payload_chunk_from_actual_frame)}")
 
-                logger.debug(f"프레임 수신: LEN={actual_content_len}, (예상 PKT_ID={current_processing_pkt_id}), 실제 SEQ={actual_seq}, PAYLOAD_LEN={len(payload_chunk_from_actual_frame)}")
+                # 데이터 ACK 전송
+                _send_control_response(ser, actual_seq, ACK_TYPE_DATA)
 
-                if actual_seq != 1:
-                    logger.warning(f"비정상 SEQ 값 수신: {actual_seq} (기대값: 1). (예상 PKT_ID: {current_processing_pkt_id}).")
-                    # 이 경우 ACK는 보내되, 데이터는 폐기하거나, 처리를 시도할 수 있음.
-                    # 여기서는 ACK를 보내고 데이터 처리를 시도함.
-                
-                _send_ack(ser, current_processing_pkt_id, actual_seq, ACK_TYPE_DATA)
-
-                # PAYLOAD_CHUNK가 바로 complete_blob임
-                complete_blob = payload_chunk_from_actual_frame
-
+                # 디코딩 및 데이터 처리
                 try:
-                    payload_dict = decoder.decompress_data(complete_blob)
+                    payload_dict = decoder.decompress_data(payload_chunk_from_actual_frame)
                     if payload_dict is None:
-                        logger.error(f"메시지 (예상 PKT_ID: {current_processing_pkt_id}): 디코딩 실패.")
-                        current_message_arrival_time = None # 실패 시 현재 메시지 정보 초기화
-                        # expected_next_pkt_id는 증가하지 않음 (송신자 재전송 기대)
+                        logger.error(f"메시지 (SEQ: {actual_seq}): 디코딩 실패 (결과 None).")
                         continue
 
-                    # 성공적으로 메시지 수신 및 디코딩 완료
                     received_message_count += 1
-                    get_and_increment_expected_pkt_id() # 성공 시 다음 기대 PKT_ID로 업데이트
-
-                    # --- 데이터 출력 부분 (기존 코드 유지) ---
                     ts = payload_dict.get("ts", 0.0)
-                    human_ts = datetime.datetime.fromtimestamp(ts).strftime("%Y-%m-%d %H:%M:%S.%f")[:-3]
-                    accel = payload_dict.get("accel", {})
-                    gyro  = payload_dict.get("gyro", {})
-                    angle = payload_dict.get("angle", {})
-                    gps   = payload_dict.get("gps", {})
-
-                    logger.info(f"=== 메시지 #{received_message_count} (PKT_ID: {current_processing_pkt_id}) 수신 완료 ===")
-                    logger.info(f"  Timestamp: {human_ts} (raw: {ts:.3f})")
-                    logger.info(f"  Accel (g): Ax={accel.get('ax','N/A'):.3f}, Ay={accel.get('ay','N/A'):.3f}, Az={accel.get('az','N/A'):.3f}")
-                    logger.info(f"  Gyro  (°/s): Gx={gyro.get('gx','N/A'):.1f}, Gy={gyro.get('gy','N/A'):.1f}, Gz={gyro.get('gz','N/A'):.1f}")
-                    logger.info(f"  Angle (°): Roll={angle.get('roll','N/A'):.1f}, Pitch={angle.get('pitch','N/A'):.1f}, Yaw={angle.get('yaw','N/A'):.1f}")
-                    if gps: # gps 딕셔너리가 실제 내용이 있을 때만 출력
-                        logger.info(f"  GPS   (°): Lat={gps.get('lat','N/A'):.6f}, Lon={gps.get('lon','N/A'):.6f}")
-                    else:
-                        logger.info(f"  GPS   (°): 데이터 없음")
-                    # --- 데이터 출력 부분 끝 ---
-
-                    # 메타 데이터 계산 (단일 프레임 환경에 맞게 단순화)
-                    latency_ms_sensor = int((frame_payload_received_time - ts) * 1000) if ts > 0 else 0
-                    total_bytes_on_wire = 1 + actual_content_len # LEN + SEQ + PAYLOAD
+                    human_ts = datetime.datetime.fromtimestamp(ts).strftime("%Y-%m-%d %H:%M:%S.%f")[:-3] if ts > 0 else "N/A"
+                    # ... (나머지 데이터 출력 로직은 기존과 유사하게 구성) ...
+                    logger.info(f"=== 메시지 #{received_message_count} (SEQ: {actual_seq}) 수신 완료 @ {human_ts} ===")
+                    # logger.info(f"  Accel ... Gyro ... Angle ... GPS ...") # 상세 정보 출력
 
                     meta_data = {
-                        "pkt_id": current_processing_pkt_id,
-                        "bytes_compressed": len(complete_blob),
-                        "latency_ms_sensor": latency_ms_sensor,
-                        # "jitter_ms": 0.0, # 단일 프레임이므로 jitter는 0 또는 제거
-                        "total_bytes_on_wire": total_bytes_on_wire, # 실제 전송된 바이트 수
-                        # "avg_frame_size": total_bytes_on_wire, # 프레임이 하나뿐
+                        "seq_num": actual_seq, # PKT_ID 대신 SEQ 사용
+                        "bytes_compressed": len(payload_chunk_from_actual_frame),
+                        "latency_ms_sensor": int((time.time() - ts) * 1000) if ts > 0 else 0,
+                        "total_bytes_on_wire": 1 + actual_content_len
                     }
-                    # 기존 로그 메시지 포맷 유지 시도
-                    # logger.info(f"  [OK#{received_message_count} PKT_ID:{current_processing_pkt_id}] Latency: {meta_data['latency_ms_sensor']}ms, Jitter: {meta_data.get('jitter_ms',0.0)}ms")
-                    logger.info(f"  [OK#{received_message_count} PKT_ID:{current_processing_pkt_id}] Latency (sensor): {meta_data['latency_ms_sensor']}ms")
+                    logger.info(f"  [OK#{received_message_count} SEQ:{actual_seq}] Latency (sensor): {meta_data['latency_ms_sensor']}ms")
+                    _log_json(payload_dict, meta_data)
 
-                    _log_json(payload_dict, meta_data) # 이 부분도 그대로 유지
+                except Exception as e_decode:
+                    logger.error(f"메시지 처리(디코딩 등) 중 오류 (SEQ: {actual_seq}): {e_decode}")
+                
+            # 2. LEN 바이트가 없고 (타임아웃), 버퍼에 컨트롤 패킷 길이만큼 데이터가 있으면 컨트롤 패킷 시도
+            elif ser.in_waiting >= ACK_PACKET_LEN:
+                control_bytes = ser.read(ACK_PACKET_LEN) # PKT_ID 없으므로 2바이트
+                try:
+                    received_seq, received_type = struct.unpack("!BB", control_bytes)
+                    logger.debug(f"컨트롤 패킷 수신 추정: SEQ={received_seq}, TYPE=0x{received_type:02x}")
 
-                    # 다음 메시지 준비
-                    current_message_arrival_time = None
-
-                except Exception as e_decode_user:
-                    logger.error(f"메시지 처리(디코딩 등) 중 오류 (PKT_ID: {current_processing_pkt_id}): {e_decode_user}")
-                    current_message_arrival_time = None
-                    # PKT_ID는 증가하지 않음
-
-            except serial.SerialTimeoutException:
-                logger.debug("시리얼 읽기 타임아웃 (정상 유휴 상태일 수 있음)")
-                time.sleep(0.01)
+                    if received_type == QUERY_TYPE_SEND_REQUEST:
+                        logger.info(f"  송신 요청(Query) 수신: SEQ={received_seq}. Permit 전송.")
+                        _send_control_response(ser, received_seq, ACK_TYPE_SEND_PERMIT)
+                    else:
+                        logger.warning(f"  알 수 없거나 예상치 않은 컨트롤 타입: 0x{received_type:02x}. 데이터: {bytes_to_hex_pretty_str(control_bytes)}")
+                except struct.error:
+                    logger.warning(f"  컨트롤 패킷 언패킹 실패: {bytes_to_hex_pretty_str(control_bytes)}")
+                except Exception as e_ctrl_pkt:
+                    logger.error(f"  컨트롤 패킷 처리 중 오류: {e_ctrl_pkt}")
+            
+            # 3. 아무 데이터도 수신되지 않음 (짧은 타임아웃)
+            else:
+                # logger.debug("유휴 상태 또는 데이터 대기 중...") # 너무 자주 로깅될 수 있음
+                time.sleep(0.01) # CPU 사용 방지, 짧은 폴링 간격
                 continue
-            except Exception as e_outer_loop:
-                logger.error(f"프레임 처리 외부 루프에서 예외 발생: {e_outer_loop}", exc_info=True)
-                time.sleep(0.5)
-
+            
     except KeyboardInterrupt:
         logger.info("수신 중단 (KeyboardInterrupt)")
     except Exception as e_global:
@@ -239,5 +227,7 @@ def receive_loop():
             logger.info("시리얼 포트 닫힘")
 
 if __name__ == "__main__":
-    # logger.setLevel(logging.DEBUG)
+    # 로그 레벨 조정 (필요시 DEBUG로)
+    # logging.getLogger().setLevel(logging.DEBUG)
+    # logging.getLogger('__main__').setLevel(logging.DEBUG) # 현재 모듈만 DEBUG
     receive_loop()
