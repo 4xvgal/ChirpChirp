@@ -5,8 +5,8 @@ packetizer.py
 • encoder.compress_data() 결과를 LoRa 프레임(SEQ+PAYLOAD_CHUNK)으로 변환.
 """
 from __future__ import annotations
-import logging # logging 추가
-from typing import Dict, Any, List
+import logging
+from typing import Dict, Any, List # List, Dict, Any 임포트 추가
 
 try:
     from .encoder import compress_data, split_into_packets, MAX_PAYLOAD_CHUNK
@@ -14,39 +14,35 @@ except ImportError: # 단독 실행 또는 PYTHONPATH 문제 시
     from encoder import compress_data, split_into_packets, MAX_PAYLOAD_CHUNK
 
 
-logger = logging.getLogger(__name__) # packetizer.py의 로거
+logger = logging.getLogger(__name__)
 
-# PACKET_HEADER_SIZE 상수는 더 이상 현재 프레임 구조에 직접적으로 필요 없음
-# PACKET_HEADER_SIZE = 3 
-
-def make_frames(sample: Dict[str, Any], pkt_id: int) -> List[bytes]:
+# make_frames 함수 수정: pkt_id 대신 message_seq를 받고, 이를 프레임 SEQ로 사용
+def make_frames(sample: Dict[str, Any], message_seq: int) -> List[bytes]:
     """
     센서 dict -> zlib 압축 -> 단일 프레임을 다음 바이트 시퀀스로 변환 (리스트에 담아 반환):
-    [ SEQ (1B) | PAYLOAD_CHUNK ]
-    pkt_id는 프레임 자체에 포함되지 않지만, 메시지 식별에 사용됩니다.
+    [ MESSAGE_SEQ (1B) | PAYLOAD_CHUNK ]
+    message_seq는 이 메시지의 고유 식별자입니다.
+    encoder.py의 split_into_packets가 반환하는 내부 "seq"는 무시됩니다.
     """
     blob = compress_data(sample)
     if not blob:
-        logger.warning(f"PKT_ID {pkt_id}: compress_data 결과가 비어있어 빈 프레임 리스트 반환")
+        # 이전에는 pkt_id를 사용했지만, 이제 message_seq를 사용
+        logger.warning(f"MESSAGE_SEQ {message_seq}: compress_data 결과가 비어있어 빈 프레임 리스트 반환")
         return []
 
-    # split_into_packets는 이제 단일 '청크' 정보를 담은 리스트를 반환
-    # max_payload_chunk_size 인자는 encoder.MAX_PAYLOAD_CHUNK 기본값을 사용
     pkts_info_list = split_into_packets(blob) 
 
-    # pkts_info_list는 항상 요소가 하나인 리스트이거나, split_into_packets가 빈 데이터를 특별 처리하면 그에 따름
-    # encoder.py의 split_into_packets는 빈 데이터에 대해 [{"seq": 1, "payload": b""}]를 반환함
-    if not pkts_info_list: # 이론상 발생하지 않아야 함 (split_into_packets가 항상 리스트 반환)
-        logger.error(f"PKT_ID {pkt_id}: split_into_packets가 예기치 않게 빈 리스트 반환.")
+    if not pkts_info_list:
+        logger.error(f"MESSAGE_SEQ {message_seq}: split_into_packets가 예기치 않게 빈 리스트 반환.")
         return []
 
     p_info = pkts_info_list[0]
-    
-
-    seq = p_info["seq"] # encoder에서 1로 설정됨
+    # encoder.py가 반환하는 p_info["seq"]는 현재 사용하지 않음 (항상 1)
     payload_chunk = p_info["payload"]
 
-    # 새 프레임 내용: SEQ(1B) + PAYLOAD_CHUNK
-    frame_content = bytes([seq]) + payload_chunk
+    # 새 프레임 내용: MESSAGE_SEQ(1B) + PAYLOAD_CHUNK
+    # message_seq를 0-255 범위로 만듦
+    frame_content = bytes([message_seq % 256]) + payload_chunk
     
-    return [frame_content] # 단일 프레임 내용을 리스트에 담아 반환
+    logger.debug(f"Frame created with MESSAGE_SEQ={message_seq % 256}, Payload_len={len(payload_chunk)}")
+    return [frame_content]
