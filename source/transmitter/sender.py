@@ -26,20 +26,20 @@ except ImportError:
         exit(1)
 
 # --- 상수 정의 ---
-GENERIC_TIMEOUT    = 65.0
+GENERIC_TIMEOUT    = 65.0 # ACK 응답 대기 시간 증가 여지
 SEND_COUNT         = 10 # 테스트용 전송 횟수
 RETRY_HANDSHAKE    = 3
-RETRY_QUERY_PERMIT = 3
-RETRY_DATA_ACK     = 3
+RETRY_QUERY_PERMIT = 3 # reliable 모드용
+RETRY_DATA_ACK     = 3 # reliable 모드용
 
 SYN_MSG            = b"SYN\r\n"
-ACK_TYPE_HANDSHAKE = 0x00 # 타입: 0x00, 시퀀스: HANDSHAKE_ACK_SEQ (0x00)
-ACK_TYPE_DATA      = 0xAA # 타입: 0xAA, 시퀀스: 해당 데이터 프레임의 시퀀스
-QUERY_TYPE_SEND_REQUEST = 0x50 # 타입: 0x50, 시퀀스: 해당 데이터 프레임의 시퀀스
-ACK_TYPE_SEND_PERMIT  = 0x55 # 타입: 0x55, 시퀀스: 해당 데이터 프레임의 시퀀스
+ACK_TYPE_HANDSHAKE = 0x00 
+ACK_TYPE_DATA      = 0xAA 
+QUERY_TYPE_SEND_REQUEST = 0x50 
+ACK_TYPE_SEND_PERMIT  = 0x55 
 
 ACK_PACKET_LEN     = 2
-HANDSHAKE_ACK_SEQ  = 0x00 # 핸드셰이크 ACK에 사용될 고정 시퀀스 번호
+HANDSHAKE_ACK_SEQ  = 0x00 
 
 logging.basicConfig(
     level=logging.INFO,
@@ -47,7 +47,6 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
-# ... (print_separator, _open_serial, bytes_to_hex_pretty_str, _tx_data_packet 함수는 변경 없음) ...
 def print_separator(title: str, length: int = 60, char: str = '-') -> None:
     if len(title) + 2 > length:
         logger.info(f"-- {title} --")
@@ -61,9 +60,9 @@ def print_separator(title: str, length: int = 60, char: str = '-') -> None:
 def _open_serial() -> serial.Serial:
     try:
         s = init_serial()
-        s.timeout = GENERIC_TIMEOUT
-        s.inter_byte_timeout = None
-        time.sleep(0.1)
+        s.timeout = GENERIC_TIMEOUT # 초기 일반 타임아웃
+        s.inter_byte_timeout = None # 초기에는 inter_byte_timeout 해제
+        time.sleep(0.1) # 포트 안정화 시간
         return s
     except serial.SerialException as e:
         logger.error(f"시리얼 포트 열기 실패: {e}")
@@ -85,7 +84,7 @@ def _tx_data_packet(s: serial.Serial, buf: bytes) -> Tuple[bool, Optional[dateti
     try:
         ts_sent = datetime.datetime.now(datetime.timezone.utc)
         written = s.write(buf)
-        s.flush()
+        s.flush() # 데이터 즉시 전송 보장
         if logger.isEnabledFor(logging.DEBUG):
             logger.debug(f"DATA PKT TX ({len(buf)}B):\n  {bytes_to_hex_pretty_str(buf)}")
         else:
@@ -95,16 +94,12 @@ def _tx_data_packet(s: serial.Serial, buf: bytes) -> Tuple[bool, Optional[dateti
         logger.error(f"DATA PKT TX 실패: {e}")
         return False, ts_sent
 
-
-# _tx_control_packet 함수는 이전 수정 사항 유지 (packet_type, seq 순서)
 def _tx_control_packet(s: serial.Serial, seq: int, packet_type: int) -> bool:
     pkt_bytes = struct.pack("!BB", packet_type, seq) # TYPE, SEQ 순서
     try:
         written = s.write(pkt_bytes)
-        s.flush()
+        s.flush() # 데이터 즉시 전송 보장
         type_name = {
-            # ACK_TYPE_HANDSHAKE 는 sender가 보내는것이 아님. 수신자가 보냄.
-            # sender가 수신자에게 보내는 control packet은 QUERY_TYPE_SEND_REQUEST 만 있음.
             QUERY_TYPE_SEND_REQUEST: "QUERY_SEND_REQUEST",
         }.get(packet_type, f"UNKNOWN_TYPE_0x{packet_type:02x}")
 
@@ -117,17 +112,16 @@ def _tx_control_packet(s: serial.Serial, seq: int, packet_type: int) -> bool:
         logger.error(f"CTRL PKT TX 실패 (TYPE=0x{packet_type:02x}, SEQ={seq}): {e}")
         return False
 
-# _handshake 함수는 이전 수정 사항 유지 (ACK 수신 시 type, seq 순서)
 def _handshake(s: serial.Serial) -> bool:
     print_separator("핸드셰이크 시작")
-    s.timeout = GENERIC_TIMEOUT
+    s.timeout = GENERIC_TIMEOUT # 핸드셰이크 ACK에 일반 타임아웃 사용
     for attempt in range(1, RETRY_HANDSHAKE + 1):
         logger.info(f"[핸드셰이크] SYN 전송 ({attempt}/{RETRY_HANDSHAKE})")
         sent_ok, ts_syn_sent = _tx_data_packet(s, SYN_MSG)
         
         if sent_ok:
             log_tx_event(
-                frame_seq=HANDSHAKE_ACK_SEQ, # 핸드셰이크는 고정 SEQ 사용
+                frame_seq=HANDSHAKE_ACK_SEQ, 
                 attempt_num=attempt,
                 event_type='HANDSHAKE_SYN_SENT',
                 ts_sent=ts_syn_sent
@@ -137,7 +131,7 @@ def _handshake(s: serial.Serial) -> bool:
                 frame_seq=HANDSHAKE_ACK_SEQ,
                 attempt_num=attempt,
                 event_type='HANDSHAKE_SYN_FAIL',
-                ts_sent=ts_syn_sent
+                ts_sent=ts_syn_sent 
             )
             logger.warning("[핸드셰이크] SYN 전송 실패, 재시도 대기 1초")
             time.sleep(1)
@@ -149,147 +143,149 @@ def _handshake(s: serial.Serial) -> bool:
 
         if len(ack_bytes) == ACK_PACKET_LEN:
             try:
-                atype, seq = struct.unpack("!BB", ack_bytes) # TYPE, SEQ 순서
+                atype, seq = struct.unpack("!BB", ack_bytes) 
                 logger.info(f"[핸드셰이크] ACK 수신: TYPE=0x{atype:02x}, SEQ={seq}")
                 if atype == ACK_TYPE_HANDSHAKE and seq == HANDSHAKE_ACK_SEQ:
                     logger.info("[핸드셰이크] 성공")
                     print_separator("핸드셰이크 완료")
                     log_tx_event(
-                        frame_seq=HANDSHAKE_ACK_SEQ,
-                        attempt_num=attempt,
+                        frame_seq=HANDSHAKE_ACK_SEQ, attempt_num=attempt,
                         event_type='HANDSHAKE_ACK_OK',
-                        ts_sent=ts_syn_sent,
-                        ts_ack_interaction_end=ts_ack_interaction_end,
-                        total_attempts_final=attempt,
-                        ack_received_final=True
+                        ts_sent=ts_syn_sent, ts_ack_interaction_end=ts_ack_interaction_end,
+                        total_attempts_final=attempt, ack_received_final=True
                     )
                     return True
                 else:
                     logger.warning(f"[핸드셰이크] 잘못된 ACK 내용 (기대: TYPE=0x{ACK_TYPE_HANDSHAKE:02x}, SEQ={HANDSHAKE_ACK_SEQ})")
                     log_tx_event(
-                        frame_seq=HANDSHAKE_ACK_SEQ,
-                        attempt_num=attempt,
-                        event_type='HANDSHAKE_ACK_INVALID',
-                        ts_sent=ts_syn_sent,
-                        ts_ack_interaction_end=ts_ack_interaction_end
+                        frame_seq=HANDSHAKE_ACK_SEQ, attempt_num=attempt, event_type='HANDSHAKE_ACK_INVALID',
+                        ts_sent=ts_syn_sent, ts_ack_interaction_end=ts_ack_interaction_end
                     )
             except struct.error:
                 logger.warning(f"[핸드셰이크] ACK 언패킹 실패: {ack_bytes!r}")
                 log_tx_event(
-                    frame_seq=HANDSHAKE_ACK_SEQ,
-                    attempt_num=attempt,
-                    event_type='HANDSHAKE_ACK_UNPACK_FAIL',
-                    ts_sent=ts_syn_sent,
-                    ts_ack_interaction_end=ts_ack_interaction_end
+                    frame_seq=HANDSHAKE_ACK_SEQ, attempt_num=attempt, event_type='HANDSHAKE_ACK_UNPACK_FAIL',
+                    ts_sent=ts_syn_sent, ts_ack_interaction_end=ts_ack_interaction_end
                 )
         else:
             logger.warning(f"[핸드셰이크] ACK 타임아웃 또는 데이터 부족 ({len(ack_bytes)}B)")
             if ack_bytes and logger.isEnabledFor(logging.DEBUG):
                 logger.debug(f"  수신 바이트:\n  {bytes_to_hex_pretty_str(ack_bytes)}")
             log_tx_event(
-                frame_seq=HANDSHAKE_ACK_SEQ,
-                attempt_num=attempt,
-                event_type='HANDSHAKE_ACK_TIMEOUT',
-                ts_sent=ts_syn_sent,
-                ts_ack_interaction_end=ts_ack_interaction_end
+                frame_seq=HANDSHAKE_ACK_SEQ, attempt_num=attempt, event_type='HANDSHAKE_ACK_TIMEOUT',
+                ts_sent=ts_syn_sent, ts_ack_interaction_end=ts_ack_interaction_end
             )
         
-        if attempt == RETRY_HANDSHAKE:
+        if attempt < RETRY_HANDSHAKE:
+             time.sleep(1) 
+        elif attempt == RETRY_HANDSHAKE: 
             log_tx_event(
-                frame_seq=HANDSHAKE_ACK_SEQ,
-                attempt_num=attempt,
-                event_type='HANDSHAKE_FINAL_FAIL',
-                ts_sent=None,
+                frame_seq=HANDSHAKE_ACK_SEQ, attempt_num=attempt, event_type='HANDSHAKE_FINAL_FAIL',
+                ts_sent=ts_syn_sent, # 마지막 시도의 ts_syn_sent 또는 이전 실패 시도의 것일 수 있음
                 ts_ack_interaction_end=ts_ack_interaction_end,
-                total_attempts_final=attempt,
-                ack_received_final=False
+                total_attempts_final=attempt, ack_received_final=False
             )
 
     logger.error("[핸드셰이크] 최종 실패")
     print_separator("핸드셰이크 실패")
     return False
 
-# send_data 함수 수정: 메시지 시퀀스 번호 사용
-def send_data(n: int = SEND_COUNT) -> int:
+def send_data(n: int = SEND_COUNT, mode: str = "reliable") -> int:
     try:
         s = _open_serial()
     except Exception:
-        return 0
+        return -1 # 시리얼 포트 열기 오류
 
     if not _handshake(s):
         s.close()
-        return 0
+        return 0 # 핸드셰이크 실패 시 성공 0
 
-    s.timeout = GENERIC_TIMEOUT
-    s.inter_byte_timeout = 0.1
+    # 핸드셰이크 후 타임아웃 설정
+    s.timeout = GENERIC_TIMEOUT       # ACK 읽기 전체 타임아웃 (Permit, Data ACK)
+    s.inter_byte_timeout = 0.1  # ACK 읽기 중 바이트 간 타임아웃 (부분 패킷 감지 도움)
+
+    effective_retry_query_permit: int
+    effective_retry_data_ack: int
+
+    if mode == "PDR":
+        effective_retry_query_permit = 1
+        effective_retry_data_ack = 1
+        logger.info("PDR 측정 모드로 실행됩니다. 재전송 비활성화.")
+    elif mode == "reliable":
+        effective_retry_query_permit = RETRY_QUERY_PERMIT
+        effective_retry_data_ack = RETRY_DATA_ACK
+        logger.info("신뢰성 전송 모드로 실행됩니다. 재전송 활성화.")
+    else:
+        logger.error(f"알 수 없는 모드: {mode}. 'reliable' 또는 'PDR'을 사용하세요.")
+        if s and s.is_open:
+            s.close()
+        return -2 # 잘못된 모드 오류
 
     try:
         sr = SensorReader()
     except Exception as e:
         logger.critical(f"SensorReader 초기화 실패: {e}")
         s.close()
-        return 0
+        return -3 # SensorReader 초기화 오류
 
-    ok_count = 0
-    # 메시지 시퀀스 번호 카운터 (0-255 순환)
-    # 핸드셰이크 후 첫 메시지 시퀀스를 0 또는 1로 시작할 수 있음. 여기서는 0부터 시작.
+    reliable_ok_count = 0 # "reliable" 모드: 성공적으로 전송된 메시지 수
+    pdr_data_acks_received_count = 0 # "PDR" 모드: 수신된 DATA ACK 수
+    pdr_messages_tx_initiated_count = 0 # "PDR" 모드: 프레임 생성 성공하여 전송 시작된 메시지 수
+
     current_message_seq_counter = 0
+    print_separator(f"총 {n}회 데이터 전송 시작 (모드: {mode})")
 
-    print_separator(f"총 {n}회 데이터 전송 시작")
-
-    for msg_idx in range(1, n + 1): # msg_idx는 단순히 몇 번째 메시지인지를 나타내는 인덱스
+    for msg_idx in range(1, n + 1):
         print_separator(f"메시지 {msg_idx}/{n} (Message SEQ: {current_message_seq_counter}) 시작")
         sample = sr.get_sensor_data()
 
         if not sample or 'ts' not in sample:
             logger.warning(f"[메시지 {msg_idx}] 샘플 데이터 유효성 검사 실패, 건너뜀")
-            # 실패 시에도 다음 메시지를 위해 시퀀스 카운터는 증가시키는 것이 좋음 (선택 사항)
-            # current_message_seq_counter = (current_message_seq_counter + 1) % 256
+            current_message_seq_counter = (current_message_seq_counter + 1) % 256
+            time.sleep(1) # 다음 메시지 시도 전 대기
             continue
 
-        # packetizer.make_frames에 현재 메시지 시퀀스 번호 전달
         frames = make_frames(sample, current_message_seq_counter)
         if not frames:
             logger.warning(f"[메시지 {msg_idx}] 프레임 생성 실패, 건너뜀")
-            # current_message_seq_counter = (current_message_seq_counter + 1) % 256
+            current_message_seq_counter = (current_message_seq_counter + 1) % 256
+            time.sleep(1) # 다음 메시지 시도 전 대기
             continue
-
-        # 현재 시스템은 메시지 당 프레임이 하나임
-        # frames[0]이 (message_seq | payload_chunk) 형태
-        raw_data_packet = bytes([len(frames[0])]) + frames[0] # LEN + (message_seq | payload_chunk)
         
-        # Query, Permit, Data ACK에 사용할 시퀀스 번호는 프레임의 첫 바이트 (즉, current_message_seq_counter % 256)
-        frame_seq_for_ack_handling = frames[0][0] # packetizer에서 %256 처리된 값
+        if mode == "PDR":
+            pdr_messages_tx_initiated_count += 1
+
+        raw_data_packet = bytes([len(frames[0])]) + frames[0]
+        frame_seq_for_ack_handling = frames[0][0]
 
         # --- 1. 전송 질의 (Query) 및 허가 (Permit) 단계 ---
         query_attempts = 0
         permission_received = False
         ts_query_sent_latest = None
 
-        while not permission_received and query_attempts < RETRY_QUERY_PERMIT:
+        while not permission_received and query_attempts < effective_retry_query_permit:
             query_attempts += 1
-            logger.info(f"[메시지 {msg_idx}] MESSAGE_SEQ={frame_seq_for_ack_handling} 전송 질의(Query) 전송 (시도 {query_attempts}/{RETRY_QUERY_PERMIT})")
+            logger.info(f"[메시지 {msg_idx}] MESSAGE_SEQ={frame_seq_for_ack_handling} 전송 질의(Query) 전송 (시도 {query_attempts}/{effective_retry_query_permit})")
             
             ts_query_sent_latest = datetime.datetime.now(datetime.timezone.utc)
-            # _tx_control_packet은 (seq, type) 순서로 인자를 받지만, 내부에서 (type, seq)로 패킹함
             query_sent_ok = _tx_control_packet(s, frame_seq_for_ack_handling, QUERY_TYPE_SEND_REQUEST)
             
             log_tx_event(
-                frame_seq=frame_seq_for_ack_handling, # 실제 프레임의 시퀀스 사용
-                attempt_num=query_attempts,
+                frame_seq=frame_seq_for_ack_handling, attempt_num=query_attempts,
                 event_type='QUERY_SENT' if query_sent_ok else 'QUERY_TX_FAIL',
                 ts_sent=ts_query_sent_latest
             )
 
             if not query_sent_ok:
                 logger.error(f"  MESSAGE_SEQ={frame_seq_for_ack_handling} Query 전송 실패.")
-                if query_attempts < RETRY_QUERY_PERMIT:
+                if query_attempts < effective_retry_query_permit: # reliable 모드에서만 재시도
                     time.sleep(0.5)
                     continue
-                else:
+                else: # Query 전송 최종 실패
                     log_tx_event(
                         frame_seq=frame_seq_for_ack_handling, attempt_num=query_attempts, event_type='QUERY_FINAL_FAIL',
-                        total_attempts_final=query_attempts, ack_received_final=False
+                        ts_sent=ts_query_sent_latest, 
+                        total_attempts_final=query_attempts, ack_received_final=False # Permit ACK 못받음
                     )
                     break # Query/Permit 루프 탈출
 
@@ -299,46 +295,44 @@ def send_data(n: int = SEND_COUNT) -> int:
 
             if len(permit_ack_bytes) == ACK_PACKET_LEN:
                 try:
-                    permit_type, permit_seq = struct.unpack("!BB", permit_ack_bytes) # TYPE, SEQ 순서
+                    permit_type, permit_seq = struct.unpack("!BB", permit_ack_bytes)
                     if permit_type == ACK_TYPE_SEND_PERMIT and permit_seq == frame_seq_for_ack_handling:
-                        logger.info(f"  MESSAGE_SEQ={frame_seq_for_ack_handling} 전송 허가(Permit) 수신 (TYPE=0x{permit_type:02x}, SEQ={permit_seq})")
                         permission_received = True
                         log_tx_event(
                             frame_seq=frame_seq_for_ack_handling, attempt_num=query_attempts, event_type='PERMIT_ACK_OK',
                             ts_sent=ts_query_sent_latest, ts_ack_interaction_end=ts_permit_interaction_end,
                             total_attempts_final=query_attempts, ack_received_final=True
                         )
-                    else:
-                        logger.warning(f"  잘못된 Permit ACK 수신: 기대(TYPE=0x{ACK_TYPE_SEND_PERMIT:02x}, SEQ={frame_seq_for_ack_handling}), 실제(TYPE=0x{permit_type:02x}, SEQ={permit_seq})")
+                    else: 
                         log_tx_event(
                             frame_seq=frame_seq_for_ack_handling, attempt_num=query_attempts, event_type='PERMIT_ACK_INVALID',
                             ts_sent=ts_query_sent_latest, ts_ack_interaction_end=ts_permit_interaction_end
                         )
-                except struct.error:
-                    logger.warning(f"  Permit ACK 언패킹 실패: {permit_ack_bytes!r}")
+                except struct.error: 
                     log_tx_event(
                         frame_seq=frame_seq_for_ack_handling, attempt_num=query_attempts, event_type='PERMIT_ACK_UNPACK_FAIL',
                         ts_sent=ts_query_sent_latest, ts_ack_interaction_end=ts_permit_interaction_end
                     )
-            else:
-                logger.warning(f"  Permit ACK 타임아웃 또는 데이터 부족 ({len(permit_ack_bytes)}B)")
+            else: 
                 log_tx_event(
                     frame_seq=frame_seq_for_ack_handling, attempt_num=query_attempts, event_type='PERMIT_ACK_TIMEOUT',
                     ts_sent=ts_query_sent_latest, ts_ack_interaction_end=ts_permit_interaction_end
                 )
             
-            if not permission_received and query_attempts == RETRY_QUERY_PERMIT:
-                 log_tx_event(
-                    frame_seq=frame_seq_for_ack_handling, attempt_num=query_attempts, event_type='PERMIT_FINAL_FAIL',
-                    ts_sent=ts_query_sent_latest, ts_ack_interaction_end=ts_permit_interaction_end,
-                    total_attempts_final=query_attempts, ack_received_final=False
-                )
-            elif not permission_received:
-                time.sleep(1)
+            if not permission_received:
+                if query_attempts == effective_retry_query_permit: # Permit ACK 최종 실패
+                    log_tx_event(
+                        frame_seq=frame_seq_for_ack_handling, attempt_num=query_attempts, event_type='PERMIT_FINAL_FAIL',
+                        ts_sent=ts_query_sent_latest, ts_ack_interaction_end=ts_permit_interaction_end,
+                        total_attempts_final=query_attempts, ack_received_final=False
+                    )
+                elif query_attempts < effective_retry_query_permit : # reliable 모드에서 재시도 전 대기
+                    time.sleep(1) 
         
         if not permission_received:
             logger.error(f"[메시지 {msg_idx}] MESSAGE_SEQ={frame_seq_for_ack_handling} 최종 Permit 미수신. 메시지 건너뜀.")
-            current_message_seq_counter = (current_message_seq_counter + 1) % 256 # 다음 메시지를 위해 시퀀스 증가
+            current_message_seq_counter = (current_message_seq_counter + 1) % 256
+            time.sleep(1)
             continue
 
         # --- 2. 실제 데이터 전송 및 데이터 ACK 대기 단계 ---
@@ -346,30 +340,30 @@ def send_data(n: int = SEND_COUNT) -> int:
         data_ack_received = False
         ts_data_sent_latest = None
 
-        while not data_ack_received and data_tx_attempts < RETRY_DATA_ACK:
+        while not data_ack_received and data_tx_attempts < effective_retry_data_ack:
             data_tx_attempts += 1
-            logger.info(f"[메시지 {msg_idx}] MESSAGE_SEQ={frame_seq_for_ack_handling} 데이터 패킷 전송 (시도 {data_tx_attempts}/{RETRY_DATA_ACK})")
+            logger.info(f"[메시지 {msg_idx}] MESSAGE_SEQ={frame_seq_for_ack_handling} 데이터 패킷 전송 (시도 {data_tx_attempts}/{effective_retry_data_ack})")
             
             data_sent_ok, ts_data_sent_latest = _tx_data_packet(s, raw_data_packet)
             
             log_tx_event(
-                frame_seq=frame_seq_for_ack_handling,
-                attempt_num=data_tx_attempts,
+                frame_seq=frame_seq_for_ack_handling, attempt_num=data_tx_attempts,
                 event_type='DATA_SENT' if data_sent_ok else 'DATA_TX_FAIL',
                 ts_sent=ts_data_sent_latest
             )
 
             if not data_sent_ok:
                 logger.error(f"  MESSAGE_SEQ={frame_seq_for_ack_handling} 데이터 패킷 전송 실패.")
-                if data_tx_attempts < RETRY_DATA_ACK:
+                if data_tx_attempts < effective_retry_data_ack: # reliable 모드에서만 재시도
                     time.sleep(0.5)
                     continue
-                else:
+                else: # 데이터 전송 최종 실패
                     log_tx_event(
                         frame_seq=frame_seq_for_ack_handling, attempt_num=data_tx_attempts, event_type='DATA_FINAL_FAIL',
-                        total_attempts_final=data_tx_attempts, ack_received_final=False
+                        ts_sent=ts_data_sent_latest, 
+                        total_attempts_final=data_tx_attempts, ack_received_final=False # Data ACK 못받음
                     )
-                    break
+                    break # Data/ACK 루프 탈출
             
             logger.info(f"  MESSAGE_SEQ={frame_seq_for_ack_handling} 데이터 ACK 대기 중 (Timeout: {s.timeout}s)...")
             data_ack_bytes = s.read(ACK_PACKET_LEN)
@@ -377,61 +371,90 @@ def send_data(n: int = SEND_COUNT) -> int:
 
             if len(data_ack_bytes) == ACK_PACKET_LEN:
                 try:
-                    ack_type, ack_seq = struct.unpack("!BB", data_ack_bytes) # TYPE, SEQ 순서
+                    ack_type, ack_seq = struct.unpack("!BB", data_ack_bytes)
                     if ack_type == ACK_TYPE_DATA and ack_seq == frame_seq_for_ack_handling:
-                        logger.info(f"  MESSAGE_SEQ={frame_seq_for_ack_handling} 데이터 ACK 확인 성공 (TYPE=0x{ack_type:02x}, SEQ={ack_seq})")
                         data_ack_received = True
                         log_tx_event(
                             frame_seq=frame_seq_for_ack_handling, attempt_num=data_tx_attempts, event_type='DATA_ACK_OK',
                             ts_sent=ts_data_sent_latest, ts_ack_interaction_end=ts_data_ack_interaction_end,
                             total_attempts_final=data_tx_attempts, ack_received_final=True
                         )
-                    else:
-                        logger.warning(f"  잘못된 데이터 ACK 수신: 기대(TYPE=0x{ACK_TYPE_DATA:02x}, SEQ={frame_seq_for_ack_handling}), 실제(TYPE=0x{ack_type:02x}, SEQ={ack_seq})")
+                        if mode == "PDR":
+                            pdr_data_acks_received_count += 1
+                    else: 
                         log_tx_event(
                             frame_seq=frame_seq_for_ack_handling, attempt_num=data_tx_attempts, event_type='DATA_ACK_INVALID',
                             ts_sent=ts_data_sent_latest, ts_ack_interaction_end=ts_data_ack_interaction_end
                         )
-                except struct.error:
-                    logger.warning(f"  데이터 ACK 언패킹 실패: {data_ack_bytes!r}")
+                except struct.error: 
                     log_tx_event(
                         frame_seq=frame_seq_for_ack_handling, attempt_num=data_tx_attempts, event_type='DATA_ACK_UNPACK_FAIL',
                         ts_sent=ts_data_sent_latest, ts_ack_interaction_end=ts_data_ack_interaction_end
                     )
-            else:
-                logger.warning(f"  데이터 ACK 타임아웃 또는 데이터 부족 ({len(data_ack_bytes)}B)")
+            else: 
                 log_tx_event(
                     frame_seq=frame_seq_for_ack_handling, attempt_num=data_tx_attempts, event_type='DATA_ACK_TIMEOUT',
                     ts_sent=ts_data_sent_latest, ts_ack_interaction_end=ts_data_ack_interaction_end
                 )
 
-            if not data_ack_received and data_tx_attempts == RETRY_DATA_ACK:
-                log_tx_event(
-                    frame_seq=frame_seq_for_ack_handling, attempt_num=data_tx_attempts, event_type='DATA_ACK_FINAL_FAIL',
-                    ts_sent=ts_data_sent_latest, ts_ack_interaction_end=ts_data_ack_interaction_end,
-                    total_attempts_final=data_tx_attempts, ack_received_final=False
-                )
-            elif not data_ack_received:
-                time.sleep(1)
+            if not data_ack_received:
+                if data_tx_attempts == effective_retry_data_ack: # 데이터 ACK 최종 실패
+                    log_tx_event(
+                        frame_seq=frame_seq_for_ack_handling, attempt_num=data_tx_attempts, event_type='DATA_ACK_FINAL_FAIL',
+                        ts_sent=ts_data_sent_latest, ts_ack_interaction_end=ts_data_ack_interaction_end,
+                        total_attempts_final=data_tx_attempts, ack_received_final=False
+                    )
+                elif data_tx_attempts < effective_retry_data_ack: # reliable 모드에서 재시도 전 대기
+                    time.sleep(1) 
 
-        if not data_ack_received:
+        if data_ack_received:
+            if mode == "reliable":
+                reliable_ok_count += 1
+            logger.info(f"[메시지 {msg_idx}] MESSAGE_SEQ={frame_seq_for_ack_handling} 전송 완료 ({msg_idx}/{n})")
+            print_separator(f"메시지 {msg_idx}/{n} 완료")
+        else: 
             logger.error(f"[메시지 {msg_idx}] MESSAGE_SEQ={frame_seq_for_ack_handling} 최종 데이터 ACK 미수신. 메시지 실패 처리.")
-            current_message_seq_counter = (current_message_seq_counter + 1) % 256 # 다음 메시지를 위해 시퀀스 증가
-            continue
         
-        ok_count += 1
-        logger.info(f"[메시지 {msg_idx}] MESSAGE_SEQ={frame_seq_for_ack_handling} 전송 완료 ({msg_idx}/{n})")
-        print_separator(f"메시지 {msg_idx}/{n} 완료")
-        
-        # 성공적으로 메시지 전송 및 ACK 수신 후 다음 메시지를 위해 시퀀스 카운터 증가
         current_message_seq_counter = (current_message_seq_counter + 1) % 256
         time.sleep(1) # 다음 메시지 전송 전 지연
 
-    print_separator(f"전체 전송 완료: {ok_count}/{n} 성공")
+    # --- 전체 전송 루프 종료 ---
+    final_return_value: int
+    if mode == "PDR":
+        pdr_value_over_n = (pdr_data_acks_received_count / n) if n > 0 else 0.0
+        
+        summary_msg_parts = [
+            f"PDR Mode 결과 - 총 메시지 루프 반복 (n): {n}",
+            f"실제 전송 시작된 메시지 (프레임 생성 성공): {pdr_messages_tx_initiated_count}",
+            f"데이터 ACK 수신: {pdr_data_acks_received_count}",
+            f"PDR (ACK 수신 / n): {pdr_value_over_n:.2%}"
+        ]
+        if pdr_messages_tx_initiated_count > 0:
+            pdr_value_over_initiated = pdr_data_acks_received_count / pdr_messages_tx_initiated_count
+            summary_msg_parts.append(f"PDR (ACK 수신 / 실제 전송 시작): {pdr_value_over_initiated:.2%}")
+        
+        summary_msg = ", ".join(summary_msg_parts)
+        logger.info(summary_msg)
+        print_separator(f"PDR 전송 완료: {pdr_data_acks_received_count}/{n} ACK 수신 (PDR: {pdr_value_over_n:.2%})")
+        final_return_value = pdr_data_acks_received_count
+    else: # reliable mode
+        summary_msg = f"신뢰성 전송 완료: {reliable_ok_count}/{n} 메시지 성공적 전송"
+        logger.info(summary_msg)
+        print_separator(summary_msg)
+        final_return_value = reliable_ok_count
+
     if s and s.is_open:
         s.close()
-    return ok_count
+    return final_return_value
 
 if __name__ == '__main__':
-    logging.getLogger().setLevel(logging.DEBUG)
-    send_data(SEND_COUNT) # SEND_COUNT 만큼 전송
+    # 로깅 레벨 설정 (INFO 또는 DEBUG)
+    # logging.getLogger().setLevel(logging.DEBUG) # 상세 정보 로깅
+    logging.getLogger().setLevel(logging.INFO)   # 일반 정보 로깅
+
+    # --- PDR 모드 테스트 ---
+    logger.info("\n" + "="*10 + " PDR 모드 테스트 시작 " + "="*10)
+    pdr_acks_received = send_data(SEND_COUNT, mode="PDR")  # reliable 로 넣으면 동작함 
+    # PDR 요약은 send_data 함수 내에서 출력됨. pdr_acks_received는 M 값.
+    logger.info(f"PDR 모드 테스트 종료, 수신된 데이터 ACK 총계: {pdr_acks_received}")
+    logger.info("="*40 + "\n")
