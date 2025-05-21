@@ -1,9 +1,10 @@
+"""
 # packet_reassembler.py (수정)
 # -*- coding: utf-8 -*-
-"""
+
 패킷 헤더(PKT_ID/SEQ/TOTAL) + payload 재조립기
 SEQ는 0-based.
-"""
+
 from __future__ import annotations
 from typing import Dict, Optional, List, Tuple
 
@@ -26,9 +27,9 @@ class PacketReassembler:
         self._current_total_frames = None
 
     def process_frame(self, frame_content: bytes) -> Optional[bytes]:
-        """
+        
         프레임 내용 (PKT_ID(1B) | SEQ(1B) | TOTAL(1B) | PAYLOAD_CHUNK)을 처리.
-        """
+        
         header_size = 3 # PKT_ID, SEQ, TOTAL
         if len(frame_content) < header_size: # 최소 헤더 크기 검사 (페이로드는 0일 수 있음)
             raise PacketReassemblyError(f"프레임 길이가 너무 짧습니다 ({len(frame_content)}B). 최소 {header_size}B 필요.")
@@ -98,3 +99,4 @@ class PacketReassembler:
             return full_blob
         
         return None # 아직 모든 프레임이 모이지 않음
+"""
