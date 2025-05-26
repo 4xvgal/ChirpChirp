@@ -17,7 +17,16 @@ try:
 except ImportError as e:
     print(f"모듈 임포트 실패: {e}. decoder.py가 같은 폴더에 있는지 확인하세요.")
     exit(1)
-
+# ────────── 로라 하드웨어 설정 ──────────
+LORA_SERIAL_PORT   = "/dev/ttyAMA0"   # 실제 라즈베리파이 UART 디바이스
+LORA_FREQ_MHZ      = 868            # MHz 단위 (건들 ㄴ)
+LORA_ADDR          = 0xFFFF         # 현재 노드 주소 (0xFFFF = broadcast)
+LORA_POWER_DBM     = 22             # 22 / 17 / 13 / 10
+LORA_RSSI_ENABLE   = True           # 패킷 및 채널 RSSI 사용 여부
+LORA_AIR_SPEED_BPS = 1200           # 1200~62500 중 지원값
+LORA_NET_ID        = 0              # 네트워크 ID (0~255)
+LORA_BUFFER_SIZE   = 240            # 240 / 128 / 64 / 32
+LORA_CRYPT_KEY     = 0              # 0~65535 (0 = 암호화 비활성)
 # ────────── 설정 ──────────
 PORT         = "/dev/ttyAMA0"
 BAUD         = 9600
@@ -33,6 +42,12 @@ ACK_TYPE_SEND_PERMIT  = 0x55
 
 ACK_PACKET_LEN     = 2
 HANDSHAKE_ACK_SEQ  = 0x00
+# ────────── 외부 모듈 import ──────────
+try:
+    from utils import sx126x  # LoRa 설정용 클래스
+except ImportError as e:
+    print(f"sx126x 모듈 임포트 실패: {e}. sx126x.py가 PYTHONPATH에 있는지 확인하세요.")
+    exit(1)
 
 # --- 로거 초기화 ---
 logging.basicConfig(level=logging.INFO, # 기본 로깅 레벨 INFO
@@ -336,9 +351,32 @@ def receive_loop():
             logger.info("시리얼 포트 닫힘")
 
 if __name__ == "__main__":
-    # 로깅 레벨 설정: 기본 INFO, 디버깅 시 DEBUG로 변경
-    # logging.getLogger().setLevel(logging.DEBUG) 
+    # 로거 레벨 필요 시 조정
     logging.getLogger().setLevel(logging.INFO)
-    # logging.getLogger('decoder').setLevel(logging.DEBUG) # 디코더 로그만 DEBUG로
 
-    receive_loop()
+    # 1) LoRa 모듈 초기화 & 설정 (sx126x 생성자)
+    logger.info("sx126x 모듈 초기화 및 설정 시작...")
+    lora = sx126x(
+        serial_num=LORA_SERIAL_PORT,
+        freq=LORA_FREQ_MHZ,
+        addr=LORA_ADDR,
+        power=LORA_POWER_DBM,
+        rssi=LORA_RSSI_ENABLE,
+        air_speed=LORA_AIR_SPEED_BPS,
+        net_id=LORA_NET_ID,
+        buffer_size=LORA_BUFFER_SIZE,
+        crypt=LORA_CRYPT_KEY,
+    )
+    # 설정 완료 후 lora.ser은 이미 노멀 모드 상태
+    logger.info("sx126x 설정 완료. 노멀 모드로 전환됨.")
+
+    # 2) 수신 루프 시작 (lora.ser 재사용)
+    try:
+        receive_loop(lora.ser)
+    finally:
+        # 프로그램 종료 시 GPIO 및 Serial 정리
+        if lora.ser and lora.ser.is_open:
+            lora.ser.close()
+            logger.info("시리얼 포트 닫힘.")
+        import RPi.GPIO as GPIO
+        GPIO.cleanup()
