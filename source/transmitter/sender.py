@@ -478,7 +478,7 @@ if __name__ == '__main__':
     pdr_acks_received = send_data(SEND_COUNT, mode="PDR")
     logger.info(f"PDR 모드 테스트 종료, 수신된 데이터 ACK 총계: {pdr_acks_received}")
     logger.info("="*40 + "\n")
-
+    
     # --- Reliable 모드 테스트 ---
     # logger.info("\n" + "="*10 + " Reliable 모드 테스트 시작 " + "="*10)
     # reliable_success_count = send_data(SEND_COUNT, mode="reliable")
