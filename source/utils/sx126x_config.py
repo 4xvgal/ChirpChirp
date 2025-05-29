@@ -1,7 +1,7 @@
 from sx126x import sx126x
 
 # --- 상수 정의 (필요시 이 값들만 수정하면 됨) ---
-SERIAL_PORT   = "/dev/AMA0"
+SERIAL_PORT   = "/dev/ttyAMA0"
 FREQ_MHZ      = 868
 NODE_ADDR     = 0x0000
 POWER_DBM     = 22         # 고정 출력값
