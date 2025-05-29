@@ -229,7 +229,6 @@ class sx126x:
             addr_temp = (self.get_reg[3] << 8) + self.get_reg[4]
             air_speed_val = self.get_reg[6] & 0x07
             power_val = self.get_reg[7] & 0x03
-            rssi_enabled = bool(self.get_reg[9] & 0x80)
 
             air_speed = next((k for k, v in self.lora_air_speed_dic.items() if v == air_speed_val), "Unknown")
             power = next((k for k, v in self.lora_power_dic.items() if v == power_val), "Unknown")
@@ -238,8 +237,7 @@ class sx126x:
             print(f" - 주파수 (offset): {fre_temp} → 실제: {self.start_freq + fre_temp}.125 MHz")
             print(f" - 노드 주소: {addr_temp}")
             print(f" - 에어 스피드: {air_speed} bps")
-            print(f" - 출력 세기: {power} dBm")
-            print(f" - RSSI 출력: {'Enabled' if rssi_enabled else 'Disabled'}\n")
+            print(f" - 출력 세기: {power} dBm\n")
         else:
             print("❌ 설정 값을 읽어오지 못했습니다.")
 
