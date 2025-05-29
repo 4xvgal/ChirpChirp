@@ -214,27 +214,36 @@ class sx126x:
 
     def get_settings(self):
         # the pin M1 of lora HAT must be high when enter setting mode and get parameters
-        GPIO.output(M1,GPIO.HIGH)
+        GPIO.output(self.M1, GPIO.HIGH)
         time.sleep(0.1)
-        
+
         # send command to get setting parameters
-        self.ser.write(bytes([0xC1,0x00,0x09]))
+        self.ser.write(bytes([0xC1, 0x00, 0x09]))
         if self.ser.inWaiting() > 0:
             time.sleep(0.1)
             self.get_reg = self.ser.read(self.ser.inWaiting())
-        
+
         # check the return characters from hat and print the setting parameters
         if self.get_reg[0] == 0xC1 and self.get_reg[2] == 0x09:
             fre_temp = self.get_reg[8]
-            addr_temp = self.get_reg[3] + self.get_reg[4]
-            air_speed_temp = self.get_reg[6] & 0x03
-            power_temp = self.get_reg[7] & 0x03
-            
-            print("Frequence is {0}.125MHz.",fre_temp)
-            print("Node address is {0}.",addr_temp)
-            print("Air speed is {0} bps"+ lora_air_speed_dic.get(None,air_speed_temp))
-            print("Power is {0} dBm" + lora_power_dic.get(None,power_temp))
-            GPIO.output(M1,GPIO.LOW)
+            addr_temp = (self.get_reg[3] << 8) + self.get_reg[4]
+            air_speed_val = self.get_reg[6] & 0x07
+            power_val = self.get_reg[7] & 0x03
+            rssi_enabled = bool(self.get_reg[9] & 0x80)
+
+            air_speed = next((k for k, v in self.lora_air_speed_dic.items() if v == air_speed_val), "Unknown")
+            power = next((k for k, v in self.lora_power_dic.items() if v == power_val), "Unknown")
+
+            print("\n📡 현재 모듈 설정:")
+            print(f" - 주파수 (offset): {fre_temp} → 실제: {self.start_freq + fre_temp}.125 MHz")
+            print(f" - 노드 주소: {addr_temp}")
+            print(f" - 에어 스피드: {air_speed} bps")
+            print(f" - 출력 세기: {power} dBm")
+            print(f" - RSSI 출력: {'Enabled' if rssi_enabled else 'Disabled'}\n")
+        else:
+            print("❌ 설정 값을 읽어오지 못했습니다.")
+
+        GPIO.output(self.M1, GPIO.LOW)
 
 #
 # the data format like as following

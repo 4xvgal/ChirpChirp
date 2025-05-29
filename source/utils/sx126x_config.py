@@ -33,3 +33,6 @@ lora = sx126x(
 )
 
 print("LoRa 모듈이 성공적으로 설정되었습니다.")
+
+# --- 현재 설정값 출력 ---
+lora.get_settings()
