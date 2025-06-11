@@ -24,17 +24,6 @@ except ImportError:
     except ImportError as e:
         print(f"모듈 임포트 실패: {e}. 프로젝트 구조 및 PYTHONPATH를 확인하세요.")
         exit(1)
-# ────────── 로라 하드웨어 설정 ──────────
-LORA_SERIAL_PORT   = "/dev/ttyAMA0"   # 실제 라즈베리파이 UART 디바이스
-LORA_FREQ_MHZ      = 868            # MHz 단위 (건들 ㄴ)
-LORA_ADDR          = 0xFFFF         # 현재 노드 주소 (0xFFFF = broadcast)
-LORA_POWER_DBM     = 22             # 22 / 17 / 13 / 10
-LORA_RSSI_ENABLE   = True           # 패킷 및 채널 RSSI 사용 여부
-LORA_AIR_SPEED_BPS = 1200           # 1200~62500 중 지원값
-LORA_NET_ID        = 0              # 네트워크 ID (0~255)
-LORA_BUFFER_SIZE   = 240            # 240 / 128 / 64 / 32
-LORA_CRYPT_KEY     = 0              # 0~65535 (0 = 암호화 비활성)
-
 # --- 상수 정의 ---
 GENERIC_TIMEOUT    = 65.0
 SEND_COUNT         = 100
@@ -50,14 +39,6 @@ ACK_TYPE_SEND_PERMIT  = 0x55
 
 ACK_PACKET_LEN     = 2
 HANDSHAKE_ACK_SEQ  = 0x00
-
-# ────────── 외부 모듈 import ──────────
-try:
-    from utils import sx126x  # LoRa 설정용 클래스
-except ImportError as e:
-    print(f"sx126x 모듈 임포트 실패: {e}. sx126x.py가 PYTHONPATH에 있는지 확인하세요.")
-    exit(1)
-
 
 logging.basicConfig(
     level=logging.INFO, # 필요시 logging.DEBUG로 변경
@@ -489,21 +470,6 @@ if __name__ == '__main__':
     logging.getLogger().setLevel(logging.INFO)   # 일반 정보 로깅
     # 특정 로거의 레벨만 조정할 수도 있습니다.
     # logging.getLogger('sender').setLevel(logging.DEBUG)
-    # 1) LoRa 모듈 초기화 & 설정 (sx126x 생성자)
-    logger.info("sx126x 모듈 초기화 및 설정 시작...")
-    lora = sx126x(
-        serial_num=LORA_SERIAL_PORT,
-        freq=LORA_FREQ_MHZ,
-        addr=LORA_ADDR,
-        power=LORA_POWER_DBM,
-        rssi=LORA_RSSI_ENABLE,
-        air_speed=LORA_AIR_SPEED_BPS,
-        net_id=LORA_NET_ID,
-        buffer_size=LORA_BUFFER_SIZE,
-        crypt=LORA_CRYPT_KEY,
-    )
-    # 설정 완료 후 lora.ser은 이미 노멀 모드 상태
-    logger.info("sx126x 설정 완료. 노멀 모드로 전환됨.")
 
     # --- PDR 모드 테스트 ---
     logger.info("\n" + "="*10 + " PDR 모드 테스트 시작 " + "="*10)
@@ -516,10 +482,3 @@ if __name__ == '__main__':
     # reliable_success_count = send_data(SEND_COUNT, mode="reliable")
     # logger.info(f"Reliable 모드 테스트 종료, 성공적으로 전송된 메시지 수: {reliable_success_count}")
     # logger.info("="*40 + "\n")
-     # 4) 종료 정리
-    if SER_INSTANCE and SER_INSTANCE.is_open:
-        SER_INSTANCE.close()
-        logger.info("시리얼 포트 닫힘.")
-    # GPIO 정리 (sx126x 내부에서 설정했으므로)
-    import RPi.GPIO as GPIO
-    GPIO.cleanup()
