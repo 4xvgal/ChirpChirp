@@ -35,7 +35,7 @@ PORT         = "/dev/ttyAMA0"
 BAUD         = 9600
 
 SERIAL_READ_TIMEOUT = 0.05
-INITIAL_SYN_TIMEOUT = 65.0
+INITIAL_SYN_TIMEOUT = 7
 
 SYN_MSG            = b"SYN\r\n"
 ACK_TYPE_HANDSHAKE = 0x00
@@ -45,6 +45,12 @@ ACK_TYPE_SEND_PERMIT  = 0x55
 
 ACK_PACKET_LEN     = 2
 HANDSHAKE_ACK_SEQ  = 0x00
+
+# --- PDR 계산을 위한 기대 총 패킷 수 ---
+# 사용자가 언급한 값 또는 실제 실험 환경에 맞게 수정하세요.
+EXPECTED_TOTAL_PACKETS = 200
+# --- PDR 계산을 위한 기대 총 패킷 수 끝 ---
+
 
 # --- 로거 초기화 ---
 logging.basicConfig(level=logging.INFO,
@@ -131,18 +137,15 @@ def receive_loop():
         rx_logger.log_rx_event(event_type="SERIAL_PORT_OPEN_FAIL", notes=f"Port: {PORT}, Error: {e}")
         return
 
-    # 핸드셰이크 로직: SYN_MSG (b"SYN\r\n")를 명확히 기대함
     handshake_success = False
     while not handshake_success:
         logger.info(f"SYN ('{SYN_MSG!r}') 대기 중 (Timeout: {ser.timeout}s)...")
         try:
             if ser.in_waiting > 0:
-                # 핸드셰이크 시도 전 입력 버퍼를 비우는 것은 중요할 수 있음
-                # 특히 이전 시도에서 불완전한 데이터가 남았을 경우를 대비
                 ser.reset_input_buffer() 
                 logger.debug("핸드셰이크 시도 전 입력 버퍼 초기화됨.")
             
-            line = ser.readline() # SYN_MSG는 \r\n으로 끝나므로 readline이 적합
+            line = ser.readline()
             
             if line == SYN_MSG:
                 logger.info(f"SYN 수신, 핸드셰이크 ACK (TYPE={ACK_TYPE_HANDSHAKE:#02x}, SEQ={HANDSHAKE_ACK_SEQ:#02x}) 전송")
@@ -151,18 +154,15 @@ def receive_loop():
                     handshake_success = True
                     logger.info("핸드셰이크 성공.")
                     rx_logger.log_rx_event(event_type="HANDSHAKE_SUCCESS")
-                    break # 핸드셰이크 성공, 루프 탈출
+                    break 
                 else:
                     logger.error("핸드셰이크 ACK 전송 실패. 1초 후 재시도...")
-                    # 실패 로깅은 _send_control_response 내부에서 처리
                     time.sleep(1)
-            elif not line: # readline 타임아웃
+            elif not line: 
                 logger.warning("핸드셰이크: SYN 대기 시간 초과. 재시도...")
                 rx_logger.log_rx_event(event_type="HANDSHAKE_SYN_TIMEOUT")
-            else: # SYN_MSG가 아닌 다른 것이 읽혔을 경우 (예: 노이즈, 깨진 데이터)
-                  # 이 경우, 아무것도 하지 않고 다음 readline()을 기다림 (조용히 무시)
+            else: 
                 logger.debug(f"핸드셰이크: SYN 대신 예상치 않은 데이터 수신 (무시됨): {line!r}")
-                # rx_logger.log_rx_event(...) 호출 없음
         except Exception as e_hs:
             logger.error(f"핸드셰이크 중 오류: {e_hs}. 1초 후 재시도...", exc_info=True)
             rx_logger.log_rx_event(event_type="HANDSHAKE_EXCEPTION", notes=str(e_hs))
@@ -179,20 +179,21 @@ def receive_loop():
     logger.info(f"핸드셰이크 완료. 데이터 수신 대기 중... (timeout={ser.timeout}s, inter_byte_timeout={ser.inter_byte_timeout}s)")
 
     received_message_count = 0
+    # PDR 계산을 위해 루프 외부에서 정의된 상수를 사용
+    expected_total_packets_for_pdr = EXPECTED_TOTAL_PACKETS
     
     try:
         while True:
-            first_byte_data = ser.read(1) # 데이터 처리는 한 바이트씩
+            first_byte_data = ser.read(1)
 
-            if not first_byte_data: # 타임아웃 시 아무것도 안 하고 다음 read() 대기
+            if not first_byte_data:
                 continue
 
             first_byte_val = first_byte_data[0]
             
-            # 1. 제어 패킷 타입인가? (긍정적 매칭)
-            if first_byte_val in KNOWN_CONTROL_TYPES_FROM_SENDER: # 예: 0x50
+            if first_byte_val in KNOWN_CONTROL_TYPES_FROM_SENDER:
                 packet_type = first_byte_val
-                first_byte_hex_str = f"0x{packet_type:02x}" # 로깅용
+                first_byte_hex_str = f"0x{packet_type:02x}"
                 
                 sequence_byte_data = ser.read(1)
                 if sequence_byte_data:
@@ -204,23 +205,17 @@ def receive_loop():
                     if packet_type == QUERY_TYPE_SEND_REQUEST:
                         logger.debug(f"  송신 요청(SEQ=0x{sequence_num:02x})에 대해 송신 허가(PERMIT ACK) 응답 전송.")
                         _send_control_response(ser, sequence_num, ACK_TYPE_SEND_PERMIT)
-                    # KNOWN_CONTROL_TYPES_FROM_SENDER에 있지만 특별한 처리 로직이 없는 다른 제어 타입은 현재 없음
-                    # else:
-                    #     logger.warning(f"  알려진 제어 타입이지만 처리 로직이 없는 패킷 수신: {first_byte_hex_str}")
-                    #     rx_logger.log_rx_event(event_type="CTRL_PKT_UNHANDLED", ...)
-                else: # 제어 패킷의 시퀀스 바이트 수신 실패
+                else:
                     logger.warning(f"제어 패킷의 시퀀스 번호 수신 실패 (TYPE={first_byte_hex_str} 이후 데이터 없음 또는 타임아웃).")
                     rx_logger.log_rx_event(event_type="CTRL_PKT_INCOMPLETE_SEQ", packet_type_recv_hex=first_byte_hex_str)
-                    if ser.in_waiting > 0: # 불완전 수신 후 버퍼 비우기
+                    if ser.in_waiting > 0:
                         junk = ser.read(ser.in_waiting)
                         logger.debug(f"  제어 패킷 불완전 수신 후 버려진 데이터 ({len(junk)}B): {bytes_to_hex_pretty_str(junk)}")
-                # 이 제어 패킷 처리 후 루프의 처음으로
                 continue 
 
-            # 2. 유효한 데이터 패킷의 LENGTH 바이트인가? (긍정적 매칭)
             elif first_byte_val in VALID_DATA_PKT_LENGTH_RANGE:
                 actual_content_len_from_length_byte = first_byte_val 
-                first_byte_hex_str = f"0x{first_byte_val:02x}" # 로깅용
+                first_byte_hex_str = f"0x{first_byte_val:02x}"
                 logger.debug(f"데이터 패킷 길이(LENGTH) 바이트 수신: {actual_content_len_from_length_byte} ({first_byte_hex_str}) - 유효 범위 내.")
                 rx_logger.log_rx_event(event_type="DATA_LEN_BYTE_RECV", packet_type_recv_hex=f"LEN_{first_byte_hex_str}", data_len_byte_value=actual_content_len_from_length_byte)
 
@@ -270,9 +265,8 @@ def receive_loop():
                                          notes="decompress_data returned None")
                             if logger.isEnabledFor(logging.DEBUG):
                                 logger.debug(f"  디코딩 실패 페이로드 HEX (압축됨):\n {bytes_to_hex_pretty_str(payload_chunk_from_actual_frame)}")
-                            # continue는 필요 없음. 이 if 블록의 끝으로 감.
-                        else: # 디코딩 성공
-                            received_message_count += 1
+                        else: 
+                            received_message_count += 1 # 디코딩 성공 시 카운트 증가
                             logger.info(f"--- 메시지 #{received_message_count} (FRAME_SEQ: 0x{actual_seq:02x}) 디코딩 성공 ---")
 
                             ts_value = payload_dict.get('ts', 0.0)
@@ -337,25 +331,47 @@ def receive_loop():
                     except Exception as e_decode_process:
                         logger.error(f"메시지 처리(디코딩 후 로깅/저장) 중 오류 (FRAME_SEQ: 0x{actual_seq:02x}): {e_decode_process}", exc_info=True)
                         rx_logger.log_rx_event(event_type="DECODE_PROCESS_ERROR", frame_seq_recv=actual_seq, notes=str(e_decode_process))
-                else: # actual_content_bytes 길이가 안맞는 경우 (콘텐츠 수신 실패)
+                else: 
                     logger.warning(f"데이터 프레임 내용 수신 실패: 기대 {actual_content_len_from_length_byte}B, 수신 {len(actual_content_bytes)}B. 수신된 데이터: {bytes_to_hex_pretty_str(actual_content_bytes)}")
                     rx_logger.log_rx_event(event_type="DATA_FRAME_CONTENT_FAIL", 
                                  data_len_byte_value=actual_content_len_from_length_byte, 
                                  notes=f"Expected {actual_content_len_from_length_byte}B, got {len(actual_content_bytes)}B. Raw: {bytes_to_hex_pretty_str(actual_content_bytes)}")
-                    if ser.in_waiting > 0: # 불완전 수신 후 버퍼 비우기
+                    if ser.in_waiting > 0:
                         junk = ser.read(ser.in_waiting)
                         logger.debug(f"  데이터 프레임 불완전 수신 후 버려진 데이터 ({len(junk)}B): {bytes_to_hex_pretty_str(junk)}")
-                # 이 데이터 패킷 처리 후 루프의 처음으로
                 continue 
 
-            # 3. 위의 어떤 조건에도 해당하지 않는 바이트 (예: 0xea 또는 정말 알 수 없는 값)
             else:
-
-                pass # 명시적으로 아무것도 안 함을 나타냄
+                pass 
 
     except KeyboardInterrupt:
         logger.info("수신 중단 (KeyboardInterrupt)")
         rx_logger.log_rx_event(event_type="KEYBOARD_INTERRUPT")
+
+        # --- PDR 계산 및 출력 ---
+        logger.info(f"--- PDR (Packet Delivery Rate) ---")
+        if expected_total_packets_for_pdr > 0:
+            pdr = (received_message_count / expected_total_packets_for_pdr) * 100
+            logger.info(f"  기대 총 패킷 수: {expected_total_packets_for_pdr}")
+            logger.info(f"  성공적으로 수신/디코딩된 패킷 수: {received_message_count}")
+            logger.info(f"  PDR: {pdr:.2f}%")
+            rx_logger.log_rx_event(
+                event_type="PDR_CALCULATED",
+                expected_packets=expected_total_packets_for_pdr,
+                received_packets=received_message_count,
+                pdr_percentage=float(f"{pdr:.2f}") # rx_logger가 float를 잘 처리하도록 명시적 형변환
+            )
+        else:
+            logger.info(f"  기대 총 패킷 수가 0 또는 음수로 설정되어 PDR을 계산할 수 없습니다.")
+            logger.info(f"  성공적으로 수신/디코딩된 패킷 수: {received_message_count}")
+            rx_logger.log_rx_event(
+                event_type="PDR_CALCULATION_SKIPPED",
+                expected_packets=expected_total_packets_for_pdr,
+                received_packets=received_message_count,
+                notes="Expected total packets is zero or negative."
+            )
+        # --- PDR 계산 및 출력 끝 ---
+
     except Exception as e_global:
         logger.error(f"전역 예외 발생: {e_global}", exc_info=True)
         rx_logger.log_rx_event(event_type="GLOBAL_EXCEPTION", notes=str(e_global))
