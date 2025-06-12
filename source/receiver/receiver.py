@@ -12,25 +12,23 @@ import binascii
 from typing import List, Optional, Dict, Any
 
 try:
-    import decoder # 같은 폴더에 있다고 가정
+    import decoder
 except ImportError as e:
     print(f"모듈 임포트 실패: {e}. decoder.py가 같은 폴더에 있는지 확인하세요.")
     exit(1)
 
 try:
-    import rx_logger # 같은 폴더의 rx_logger.py 임포트
+    import rx_logger
 except ImportError as e:
-    print(f"RX 로거 모듈 임포트 실패: {e}. rx_logger.py가 receiver.py와 같은 폴더에 있는지 확인하세요.")
     class DummyRxLogger:
-        def log_rx_event(*args, **kwargs):
-            pass
+        def log_rx_event(*args, **kwargs): pass
     rx_logger = DummyRxLogger()
     print("경고: rx_logger 임포트 실패. CSV 이벤트 로깅이 비활성화됩니다.")
 
 # ────────── 설정 ──────────
 PORT         = "/dev/ttyAMA0"
 BAUD         = 9600
-SENDER_COMPRESSION_METHOD = "none" # sender.py와 동일하게 설정
+SENDER_COMPRESSION_METHOD = "none"
 
 SERIAL_READ_TIMEOUT = 0.05
 INITIAL_SYN_TIMEOUT = 7
@@ -42,10 +40,7 @@ ACK_TYPE_SEND_PERMIT  = 0x55
 ACK_PACKET_LEN     = 2
 HANDSHAKE_ACK_SEQ  = 0x00
 EXPECTED_TOTAL_PACKETS = 200
-
-# --- [추가] 재-핸드셰이크 임계값 ---
 RE_HANDSHAKE_THRESHOLD = 3
-# --- [추가] 끝 ---
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(name)s - %(levelname)s - %(message)s", datefmt="%Y-%m-%d %H:%M:%S")
 logger = logging.getLogger(__name__)
@@ -93,16 +88,13 @@ def receive_loop():
         ser = serial.Serial(PORT, BAUD, timeout=INITIAL_SYN_TIMEOUT)
         ser.inter_byte_timeout = 0.02
         logger.info(f"시리얼 포트 {PORT} 열기 성공.")
-        rx_logger.log_rx_event(event_type="SERIAL_PORT_OPEN_SUCCESS", notes=f"Port: {PORT}, Baud: {BAUD}")
     except serial.SerialException as e:
         logger.error(f"포트 열기 실패 ({PORT}): {e}")
-        rx_logger.log_rx_event(event_type="SERIAL_PORT_OPEN_FAIL", notes=f"Port: {PORT}, Error: {e}")
         return
 
     received_message_count = 0
     
-    # --- [수정] 전체 세션을 루프로 감싸 재-핸드셰이크 지원 ---
-    while True:
+    while True: # 메인 세션 루프
         handshake_success = False
         while not handshake_success:
             logger.info(f"SYN ('{SYN_MSG!r}') 대기 중 (Timeout: {ser.timeout}s)...")
@@ -110,30 +102,25 @@ def receive_loop():
                 if ser.in_waiting > 0: ser.reset_input_buffer()
                 line = ser.readline()
                 if line == SYN_MSG:
-                    logger.info(f"SYN 수신, 핸드셰이크 ACK (TYPE={ACK_TYPE_HANDSHAKE:#02x}, SEQ={HANDSHAKE_ACK_SEQ:#02x}) 전송")
-                    rx_logger.log_rx_event(event_type="HANDSHAKE_SYN_RECV", packet_type_recv_hex="SYN")
+                    logger.info(f"SYN 수신, 핸드셰이크 ACK 전송")
                     if _send_control_response(ser, HANDSHAKE_ACK_SEQ, ACK_TYPE_HANDSHAKE):
                         handshake_success = True
                         logger.info("핸드셰이크 성공.")
-                        rx_logger.log_rx_event(event_type="HANDSHAKE_SUCCESS")
                         break
                     else:
                         logger.error("핸드셰이크 ACK 전송 실패. 1초 후 재시도...")
                         time.sleep(1)
                 elif not line:
                     logger.warning("핸드셰이크: SYN 대기 시간 초과. 재시도...")
-                    rx_logger.log_rx_event(event_type="HANDSHAKE_SYN_TIMEOUT")
                 else:
-                    logger.debug(f"핸드셰이크: SYN 대신 예상치 않은 데이터 수신 (무시됨): {line!r}")
+                    logger.debug(f"핸드셰이크: 예상치 않은 데이터 수신 (무시됨): {line!r}")
             except Exception as e_hs:
                 logger.error(f"핸드셰이크 중 오류: {e_hs}. 1초 후 재시도...", exc_info=True)
-                rx_logger.log_rx_event(event_type="HANDSHAKE_EXCEPTION", notes=str(e_hs))
                 time.sleep(1)
 
         ser.timeout = SERIAL_READ_TIMEOUT
         logger.info(f"핸드셰이크 완료. 데이터 수신 대기 중...")
-
-        # --- [추가] 재-핸드셰이크를 위한 카운터 초기화 ---
+        
         unexpected_syn_counter = 0
 
         # 데이터 수신 루프
@@ -145,59 +132,60 @@ def receive_loop():
             first_byte_val = first_byte_data[0]
             re_handshake_needed = False
 
-            if first_byte_val in KNOWN_CONTROL_TYPES_FROM_SENDER:
-                unexpected_syn_counter = 0 # 유효 패킷이므로 카운터 리셋
-                packet_type = first_byte_val
-                sequence_byte_data = ser.read(1)
-                if sequence_byte_data:
-                    sequence_num = sequence_byte_data[0]
-                    type_name_str = "QUERY_SEND_REQUEST" if packet_type == QUERY_TYPE_SEND_REQUEST else f"UNKNOWN_CTRL_0x{packet_type:02x}"
-                    logger.info(f"제어 패킷 수신: TYPE={type_name_str} (0x{packet_type:02x}), SEQ=0x{sequence_num:02x}")
-                    if packet_type == QUERY_TYPE_SEND_REQUEST:
-                        _send_control_response(ser, sequence_num, ACK_TYPE_SEND_PERMIT)
-                continue
-
-            elif first_byte_val in VALID_DATA_PKT_LENGTH_RANGE:
-                unexpected_syn_counter = 0 # 유효 패킷이므로 카운터 리셋
-                actual_content_len_from_length_byte = first_byte_val
-                actual_content_bytes = ser.read(actual_content_len_from_length_byte)
+            if first_byte_val in KNOWN_CONTROL_TYPES_FROM_SENDER or first_byte_val in VALID_DATA_PKT_LENGTH_RANGE:
+                # 유효한 패킷이므로 카운터 리셋
+                unexpected_syn_counter = 0
                 
-                rssi_raw_value: Optional[int] = None; rssi_dbm_value: Optional[int] = None
-                if len(actual_content_bytes) == actual_content_len_from_length_byte:
-                    rssi_byte_data = ser.read(1)
-                    if rssi_byte_data:
-                        rssi_raw_value = rssi_byte_data[0]
-                        try: rssi_dbm_value = -(256 - rssi_raw_value)
-                        except TypeError: rssi_dbm_value = None
+                # 기존 패킷 처리 로직 (분리하지 않고 그대로 둠)
+                if first_byte_val in KNOWN_CONTROL_TYPES_FROM_SENDER:
+                    packet_type = first_byte_val
+                    sequence_byte_data = ser.read(1)
+                    if sequence_byte_data:
+                        sequence_num = sequence_byte_data[0]
+                        type_name_str = "QUERY_SEND_REQUEST" if packet_type == QUERY_TYPE_SEND_REQUEST else f"UNKNOWN_CTRL_0x{packet_type:02x}"
+                        logger.info(f"제어 패킷 수신: TYPE={type_name_str}, SEQ=0x{sequence_num:02x}")
+                        if packet_type == QUERY_TYPE_SEND_REQUEST:
+                            _send_control_response(ser, sequence_num, ACK_TYPE_SEND_PERMIT)
+                    continue
 
-                if len(actual_content_bytes) == actual_content_len_from_length_byte:
-                    actual_seq = actual_content_bytes[0]
-                    payload_chunk = actual_content_bytes[1:]
-                    rssi_info_str = f", RSSI_dBm={rssi_dbm_value}dBm" if rssi_dbm_value is not None else ""
-                    logger.info(f"데이터 프레임 수신: LENGTH={actual_content_len_from_length_byte}B, SEQ=0x{actual_seq:02x}, PAYLOAD_LEN={len(payload_chunk)}B{rssi_info_str}")
+                elif first_byte_val in VALID_DATA_PKT_LENGTH_RANGE:
+                    actual_content_len = first_byte_val
+                    actual_content_bytes = ser.read(actual_content_len)
                     
-                    _send_control_response(ser, actual_seq, ACK_TYPE_DATA)
-                    
-                    try:
-                        payload_dict = decoder.decode(payload_chunk, method=SENDER_COMPRESSION_METHOD)
-                        if payload_dict:
-                            received_message_count += 1
-                            logger.info(f"--- 메시지 #{received_message_count} (SEQ: 0x{actual_seq:02x}) 디코딩 성공 ---")
-                            # (자세한 로깅 및 JSON 저장 로직은 여기에 위치)
-                        else:
-                            logger.error(f"메시지 (SEQ: 0x{actual_seq:02x}): 디코딩 실패.")
-                    except Exception as e_decode:
-                        logger.error(f"디코딩 중 오류 (SEQ: 0x{actual_seq:02x}): {e_decode}", exc_info=True)
-                continue
-
+                    if len(actual_content_bytes) == actual_content_len:
+                        rssi_byte_data = ser.read(1) # RSSI 읽기 시도
+                        actual_seq = actual_content_bytes[0]
+                        payload_chunk = actual_content_bytes[1:]
+                        
+                        logger.info(f"데이터 프레임 수신: LENGTH={actual_content_len}B, SEQ=0x{actual_seq:02x}, PAYLOAD_LEN={len(payload_chunk)}B")
+                        _send_control_response(ser, actual_seq, ACK_TYPE_DATA)
+                        
+                        try:
+                            payload_dict = decoder.decode(payload_chunk, method=SENDER_COMPRESSION_METHOD)
+                            if payload_dict:
+                                received_message_count += 1
+                                logger.info(f"--- 메시지 #{received_message_count} (SEQ: 0x{actual_seq:02x}) 디코딩 성공 ---")
+                                _log_json(payload_dict, {"recv_frame_seq": actual_seq})
+                            else:
+                                logger.error(f"메시지 (SEQ: 0x{actual_seq:02x}): 디코딩 실패.")
+                        except Exception as e_decode:
+                            logger.error(f"디코딩 중 오류 (SEQ: 0x{actual_seq:02x}): {e_decode}", exc_info=True)
+                    continue
             else:
-                # --- [핵심 수정] 알 수 없는 바이트 처리 및 SYN 감지 ---
-                if first_byte_val == SYN_MSG[0]: # 'S'로 시작하는지 확인
+                # 알 수 없는 바이트 처리 및 SYN 감지
+                if first_byte_val == SYN_MSG[0]:
                     rest_of_syn = ser.read(len(SYN_MSG) - 1)
                     full_message = first_byte_data + rest_of_syn
+                    
                     if full_message == SYN_MSG:
+                        # --- [핵심 수정] SYN 수신 시 즉시 ACK 응답 ---
+                        logger.warning(f"데이터 수신 중 예기치 않은 SYN 수신. ACK로 응답합니다.")
+                        _send_control_response(ser, HANDSHAKE_ACK_SEQ, ACK_TYPE_HANDSHAKE)
+                        # --- 수정 끝 ---
+                        
                         unexpected_syn_counter += 1
-                        logger.warning(f"데이터 수신 중 예기치 않은 SYN 수신 (연속 {unexpected_syn_counter}회).")
+                        logger.warning(f"연속적인 비정상 SYN 수신 카운트: {unexpected_syn_counter}회.")
+                        
                         if unexpected_syn_counter >= RE_HANDSHAKE_THRESHOLD:
                             logger.error(f"재-핸드셰이크 임계값({RE_HANDSHAKE_THRESHOLD}회) 도달. 핸드셰이크 모드로 복귀합니다.")
                             re_handshake_needed = True
@@ -209,27 +197,22 @@ def receive_loop():
                     logger.debug(f"알 수 없는 바이트 수신: 0x{first_byte_val:02x}")
             
             if re_handshake_needed:
-                break # 데이터 수신 루프를 중단하고 메인 세션 루프로 돌아가 재-핸드셰이크 시도
+                break # 데이터 수신 루프를 중단하고 메인 세션 루프로 돌아감
 
         if not re_handshake_needed:
-            # 정상적으로 루프가 종료된 경우 (예: KeyboardInterrupt)
-            break # 메인 세션 루프도 종료
+            break # 정상적으로 루프가 종료된 경우 (예: KeyboardInterrupt)
     
-    # 이 부분은 KeyboardInterrupt나 다른 예외에 의해 도달
+    # 프로그램 종료 로직
     logger.info("수신 프로그램 종료 중...")
     if ser and ser.is_open:
         ser.close()
         logger.info("시리얼 포트 닫힘")
 
-    # PDR 계산
-    logger.info(f"--- PDR (Packet Delivery Rate) ---")
+    logger.info(f"--- 최종 수신 결과 ---")
+    logger.info(f"  성공적으로 수신/디코딩된 패킷 수: {received_message_count}")
     if EXPECTED_TOTAL_PACKETS > 0:
         pdr = (received_message_count / EXPECTED_TOTAL_PACKETS) * 100
-        logger.info(f"  기대 총 패킷 수: {EXPECTED_TOTAL_PACKETS}")
-        logger.info(f"  성공적으로 수신/디코딩된 패킷 수: {received_message_count}")
-        logger.info(f"  PDR: {pdr:.2f}%")
-    else:
-        logger.info(f"  기대 총 패킷 수가 0이므로 PDR을 계산할 수 없습니다.")
+        logger.info(f"  PDR ({received_message_count}/{EXPECTED_TOTAL_PACKETS}): {pdr:.2f}%")
 
 
 if __name__ == "__main__":
