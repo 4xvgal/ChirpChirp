@@ -34,8 +34,10 @@ except ImportError as e:
 PORT         = "/dev/ttyAMA0"
 BAUD         = 9600
 
-# --- [추가] Sender에서 사용하는 압축 방식과 동일하게 설정 ---
-# "zlib", "none", "bam" 중 하나를 선택해야 합니다.
+# --- [수정] Sender에서 사용하는 압축 방식과 동일하게 설정 ---
+# 테스트하려는 모드를 sender.py와 동일하게 설정하세요.
+# - 실제 압축: "zlib", "none", "bam"
+# - PDR 테스트용 더미 페이로드 (크기별): "dummy_24b", "dummy_16b", "dummy_8b"
 SENDER_COMPRESSION_METHOD = "none"
 # --- [추가] 끝 ---
 

@@ -8,26 +8,22 @@ from typing import Dict, Any, Tuple
 
 logger = logging.getLogger(__name__)
 
-# _FMT, _FIELDS는 decoder.py와 완벽히 동기화되어야 합니다.
 _FMT = "<Ihhhhhhhhhffh"  # 32 B
 _FIELDS = (
-    ("ts", 1),
-    ("accel.ax", 1000),
-    ("accel.ay", 1000),
-    ("accel.az", 1000),
-    ("gyro.gx", 10),
-    ("gyro.gy", 10),
-    ("gyro.gz", 10),
-    ("angle.roll", 10),
-    ("angle.pitch", 10),
-    ("angle.yaw", 10),
-    ("gps.lat", 1.0),
-    ("gps.lon", 1.0),
+    ("ts", 1), ("accel.ax", 1000), ("accel.ay", 1000), ("accel.az", 1000),
+    ("gyro.gx", 10), ("gyro.gy", 10), ("gyro.gz", 10), ("angle.roll", 10),
+    ("angle.pitch", 10), ("angle.yaw", 10), ("gps.lat", 1.0), ("gps.lon", 1.0),
     ("gps.altitude", 10.0)
 )
 
+# --- [추가] PDR 테스트용 더미 페이로드 크기 정의 ---
+_DUMMY_SIZE_24B = 24  # 원본 32B 대비 25% 감소
+_DUMMY_SIZE_16B = 16  # 원본 32B 대비 50% 감소
+_DUMMY_SIZE_8B = 8   # 원본 32B 대비 75% 감소
+# --- [추가] 끝 ---
+
 def _extract(src: Dict[str, Any], dotted: str):
-    """딕셔너리에서 중첩된 키를 사용하여 값을 추출합니다."""
+    # ... (기존 코드와 동일)
     parts = dotted.split('.')
     v = src
     for p_idx, p in enumerate(parts):
@@ -41,16 +37,16 @@ def _extract(src: Dict[str, Any], dotted: str):
              raise TypeError(f"'{missing_path}' (값: {v})는 딕셔너리가 아닙니다.")
     return v
 
+
 def bam_encode(vector: Tuple) -> int:
-    """BAM 압축 스텁(stub) 함수. 13개 값을 1바이트 코드로 매핑합니다."""
+    # ... (기존 코드와 동일)
     logger.debug(f"BAM 압축 실행 (스텁): 입력 벡터 크기 {len(vector)}")
-    # 예시: 타임스탬프의 마지막 8비트를 코드로 사용
     ts = vector[0]
-    code = ts & 0xFF
-    return code
+    return ts & 0xFF
+
 
 def encode_data(data: Dict[str, Any]) -> bytes:
-    """센서 딕셔너리를 압축되지 않은 32바이트 struct 바이트로 인코딩합니다."""
+    # ... (기존 코드와 동일)
     try:
         values_to_pack = []
         for field_path, scale in _FIELDS:
@@ -62,7 +58,6 @@ def encode_data(data: Dict[str, Any]) -> bytes:
             else:
                 scaled_value = int(float(raw_value) * scale)
                 values_to_pack.append(scaled_value)
-
         packed = struct.pack(_FMT, *values_to_pack)
         logger.debug(f"데이터 인코딩 (struct.pack): {len(packed)}B 생성됨.")
         return packed
@@ -86,24 +81,27 @@ def compress_layer(payload: bytes, method: str) -> bytes:
         try:
             vec = struct.unpack(_FMT, payload)
             code = bam_encode(vec)
-            compressed = code.to_bytes(1, "little")
-            logger.debug(f"압축 방법: bam (원본 {len(payload)}B -> 압축 {len(compressed)}B)")
-            return compressed
+            return code.to_bytes(1, "little")
         except struct.error as e:
             logger.error(f"BAM 압축을 위한 언패킹 실패: {e}. payload 길이: {len(payload)}B")
             return b''
+    # --- [추가] PDR 테스트용 더미 모드 ---
+    elif method == "dummy_24b":
+        logger.debug(f"압축 방법: dummy_24b (고정 24B 페이로드 생성)")
+        return b'\xAA' * _DUMMY_SIZE_24B
+    elif method == "dummy_16b":
+        logger.debug(f"압축 방법: dummy_16b (고정 16B 페이로드 생성)")
+        return b'\xBB' * _DUMMY_SIZE_16B
+    elif method == "dummy_8b":
+        logger.debug(f"압축 방법: dummy_8b (고정 8B 페이로드 생성)")
+        return b'\xCC' * _DUMMY_SIZE_8B
+    # --- [추가] 끝 ---
     else:
         raise ValueError(f"알 수 없는 압축 method: '{method}'")
 
 def encode(dct: Dict[str, Any], method: str = "zlib") -> bytes:
-    """
-    [메인 함수] sender가 호출할 진입점.
-    데이터를 인코딩하고 지정된 방법으로 압축하여 최종 전송 페이로드를 생성합니다.
-    """
-    # 1. 센서 데이터를 32바이트 struct로 인코딩
+    """[메인 함수] sender가 호출할 진입점."""
     packed_data = encode_data(dct)
     if not packed_data:
         return b""
-
-    # 2. 압축 레이어를 통해 최종 페이로드 생성
     return compress_layer(packed_data, method=method)

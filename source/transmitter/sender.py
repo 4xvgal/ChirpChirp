@@ -29,8 +29,10 @@ except ImportError:
 # --- [수정] 끝 ---
 
 
-# --- [추가] 압축 방식 설정 ---
-# "zlib", "none", "bam" 중 하나를 선택하세요.
+# --- [수정] 압축 방식 설정 ---
+# 테스트하려는 모드를 선택하세요.
+# - 실제 압축: "zlib", "none", "bam"
+# - PDR 테스트용 더미 페이로드 (크기별): "dummy_24b", "dummy_16b", "dummy_8b"
 COMPRESSION_METHOD = "none" 
 # --- [추가] 끝 ---
 
