@@ -1,6 +1,5 @@
 # sender.py
-# -*- coding: utf-8 -*-
-
+# -- coding: utf-8 --
 from __future__ import annotations
 import time
 import logging
@@ -9,7 +8,6 @@ import struct
 import datetime
 from typing import Any, Dict, List, Optional, Tuple
 import binascii
-
 try:
     from .e22_config    import init_serial
     from .packetizer    import make_frames
@@ -26,18 +24,16 @@ except ImportError:
         exit(1)
 
 # --- 상수 정의 ---
-GENERIC_TIMEOUT    = 65.0
-SEND_COUNT         = 100
-RETRY_HANDSHAKE    = 3
-RETRY_QUERY_PERMIT = 3
-RETRY_DATA_ACK     = 3
-
+GENERIC_TIMEOUT    = 5
+SEND_COUNT         = 200
+RETRY_HANDSHAKE    = 50
+RETRY_QUERY_PERMIT = 50
+RETRY_DATA_ACK     = 50
 SYN_MSG            = b"SYN\r\n"
 ACK_TYPE_HANDSHAKE = 0x00
 ACK_TYPE_DATA      = 0xAA
 QUERY_TYPE_SEND_REQUEST = 0x50
 ACK_TYPE_SEND_PERMIT  = 0x55
-
 ACK_PACKET_LEN     = 2
 HANDSHAKE_ACK_SEQ  = 0x00
 
@@ -106,7 +102,6 @@ def _tx_control_packet(s: serial.Serial, seq: int, packet_type: int) -> bool:
         type_name = {
             QUERY_TYPE_SEND_REQUEST: "QUERY_SEND_REQUEST",
         }.get(packet_type, f"UNKNOWN_TYPE_0x{packet_type:02x}")
-
         if logger.isEnabledFor(logging.DEBUG):
             logger.debug(f"CTRL PKT TX ({len(pkt_bytes)}B): TYPE={type_name} (0x{packet_type:02x}), SEQ={seq}\n  {bytes_to_hex_pretty_str(pkt_bytes)}")
         else:
@@ -121,8 +116,7 @@ def _handshake(s: serial.Serial) -> bool:
     s.timeout = GENERIC_TIMEOUT
     for attempt in range(1, RETRY_HANDSHAKE + 1):
         logger.info(f"[핸드셰이크] SYN 전송 ({attempt}/{RETRY_HANDSHAKE})")
-        sent_ok, ts_syn_sent = _tx_data_packet(s, SYN_MSG) # SYN_MSG는 길이가 고정적이므로 첫 바이트 로깅은 큰 의미 없을 수 있음
-
+        sent_ok, ts_syn_sent = _tx_data_packet(s, SYN_MSG)
         if sent_ok:
             log_tx_event(
                 frame_seq=HANDSHAKE_ACK_SEQ,
@@ -199,7 +193,7 @@ def send_data(n: int = SEND_COUNT, mode: str = "reliable") -> int:
         s = _open_serial()
     except Exception:
         return -1
-
+    
     if not _handshake(s):
         s.close()
         return 0
@@ -242,7 +236,7 @@ def send_data(n: int = SEND_COUNT, mode: str = "reliable") -> int:
         print_separator(f"메시지 {msg_idx}/{n} (Message SEQ: {current_message_seq_counter}) 시작")
         sample = sr.get_sensor_data()
 
-        if not sample or 'ts' not in sample: # sensor_reader가 None을 반환하거나 ts가 없는 경우
+        if not sample or 'ts' not in sample:
             logger.warning(f"[메시지 {msg_idx}] 유효하지 않은 샘플 데이터 수신, 건너뜀. Sample: {sample}")
             current_message_seq_counter = (current_message_seq_counter + 1) % 256
             time.sleep(1)
@@ -255,17 +249,14 @@ def send_data(n: int = SEND_COUNT, mode: str = "reliable") -> int:
             time.sleep(1)
             continue
 
-        # --- 3단계 로깅 추가 ---
-        # frames[0]은 [MESSAGE_SEQ (1B) | PAYLOAD_CHUNK] 형태. 이 길이가 데이터 패킷의 첫 바이트인 LENGTH가 됨.
         frame_content_len = len(frames[0])
         logger.info(f"[메시지 {msg_idx}] 생성된 프레임 내용 길이 (frame_content_len / 데이터 패킷의 LENGTH 값): {frame_content_len} (0x{frame_content_len:02x})")
-        # --- 로깅 추가 끝 ---
 
         if mode == "PDR":
             pdr_messages_tx_initiated_count += 1
 
-        raw_data_packet = bytes([frame_content_len]) + frames[0] # LENGTH 바이트 + 프레임 내용
-        frame_seq_for_ack_handling = frames[0][0] # 프레임 내용의 첫 바이트는 MESSAGE_SEQ
+        raw_data_packet = bytes([frame_content_len]) + frames[0]
+        frame_seq_for_ack_handling = frames[0][0]
 
         query_attempts = 0
         permission_received = False
@@ -298,15 +289,17 @@ def send_data(n: int = SEND_COUNT, mode: str = "reliable") -> int:
                     break
 
             logger.info(f"  MESSAGE_SEQ={frame_seq_for_ack_handling} 전송 허가(Permit) 대기 중 (Timeout: {s.timeout}s)...")
-            # Permit ACK 수신 전 입력 버퍼 초기화 (선택적, 이전 데이터 영향 최소화)
-            s.reset_input_buffer()
+            
+            # [수정] 이 라인은 수신기가 보낸 응답(Permit)을 읽기도 전에 지워버리는 타이밍 문제를 유발하므로 주석 처리합니다.
+            # s.reset_input_buffer()
+            
             permit_ack_bytes = s.read(ACK_PACKET_LEN)
             ts_permit_interaction_end = datetime.datetime.now(datetime.timezone.utc)
 
             if len(permit_ack_bytes) == ACK_PACKET_LEN:
                 try:
                     permit_type, permit_seq = struct.unpack("!BB", permit_ack_bytes)
-                    logger.debug(f"Permit ACK 후보 수신: TYPE=0x{permit_type:02x}, SEQ=0x{permit_seq:02x}") # DEBUG 로그 추가
+                    logger.debug(f"Permit ACK 후보 수신: TYPE=0x{permit_type:02x}, SEQ=0x{permit_seq:02x}")
                     if permit_type == ACK_TYPE_SEND_PERMIT and permit_seq == frame_seq_for_ack_handling:
                         permission_received = True
                         log_tx_event(
@@ -379,8 +372,10 @@ def send_data(n: int = SEND_COUNT, mode: str = "reliable") -> int:
                     break
 
             logger.info(f"  MESSAGE_SEQ={frame_seq_for_ack_handling} 데이터 ACK 대기 중 (Timeout: {s.timeout}s)...")
-            # Data ACK 수신 전 입력 버퍼 초기화
-            s.reset_input_buffer()
+            
+            # [수정] 이 라인 역시 수신기가 보낸 응답(Data ACK)을 읽기도 전에 지워버리는 타이밍 문제를 유발하므로 주석 처리합니다.
+            # s.reset_input_buffer()
+            
             data_ack_bytes = s.read(ACK_PACKET_LEN)
             ts_data_ack_interaction_end = datetime.datetime.now(datetime.timezone.utc)
 
@@ -435,7 +430,7 @@ def send_data(n: int = SEND_COUNT, mode: str = "reliable") -> int:
             logger.error(f"[메시지 {msg_idx}] MESSAGE_SEQ={frame_seq_for_ack_handling} 최종 데이터 ACK 미수신. 메시지 실패 처리.")
 
         current_message_seq_counter = (current_message_seq_counter + 1) % 256
-        time.sleep(1) # 다음 메시지 전송 전 지연 (LoRa 채널 사용 등 고려)
+        time.sleep(1)
 
     final_return_value: int
     if mode == "PDR":
@@ -471,14 +466,13 @@ if __name__ == '__main__':
     logging.getLogger().setLevel(logging.INFO)   # 일반 정보 로깅
     # 특정 로거의 레벨만 조정할 수도 있습니다.
     # logging.getLogger('sender').setLevel(logging.DEBUG)
-
-
+    
     # --- PDR 모드 테스트 ---
     logger.info("\n" + "="*10 + " PDR 모드 테스트 시작 " + "="*10)
     pdr_acks_received = send_data(SEND_COUNT, mode="PDR")
     logger.info(f"PDR 모드 테스트 종료, 수신된 데이터 ACK 총계: {pdr_acks_received}")
     logger.info("="*40 + "\n")
-    
+
     # --- Reliable 모드 테스트 ---
     # logger.info("\n" + "="*10 + " Reliable 모드 테스트 시작 " + "="*10)
     # reliable_success_count = send_data(SEND_COUNT, mode="reliable")
