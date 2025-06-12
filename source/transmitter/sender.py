@@ -34,7 +34,7 @@ except ImportError:
 COMPRESSION_METHOD = "none" # <--- 여기를 바꿔서 테스트
 
 # --- 상수 정의 ---
-GENERIC_TIMEOUT    = 5
+GENERIC_TIMEOUT    = 7
 SEND_COUNT         = 200
 RETRY_HANDSHAKE    = 50
 RETRY_QUERY_PERMIT = 50
