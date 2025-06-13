@@ -4,6 +4,7 @@
 from __future__ import annotations
 import struct
 import logging
+import os
 from typing import Dict, Any, Optional
 
 logger = logging.getLogger(__name__)
@@ -17,11 +18,10 @@ _FIELDS = (
     ("gps.lat", 1.0), ("gps.lon", 1.0), ("gps.altitude", 10)
 )
 
-# LoRa 프레임 콘텐츠의 최대 크기 (SEQ 1바이트 + PAYLOAD)
-# 예: E22 모듈의 최대 전송 크기가 58바이트라고 가정할 때, LENGTH 바이트(1)를 제외한 크기
 MAX_FRAME_CONTENT_SIZE = 57
 
 def _extract(src: Dict[str, Any], dotted: str):
+    """점(.)으로 구분된 경로 문자열을 사용하여 중첩된 딕셔너리에서 값을 추출합니다."""
     parts = dotted.split('.')
     v = src
     for p_idx, p in enumerate(parts):
@@ -46,10 +46,6 @@ def _pack_data(data: Dict[str, Any]) -> bytes:
             else:
                 values_to_pack.append(int(float(raw_value) * scale))
 
-        if len(values_to_pack) != len(_FMT) - 1:
-             logger.error(f"패킹할 값의 개수 불일치: 기대 {len(_FMT)-1}, 실제 {len(values_to_pack)}")
-             return b""
-
         packed = struct.pack(_FMT, *values_to_pack)
         logger.debug(f"데이터 패킹 완료: 원본 {len(packed)}B. (ts: {data.get('ts')})")
         return packed
@@ -61,14 +57,14 @@ def _pack_data(data: Dict[str, Any]) -> bytes:
         logger.error(f"_pack_data: 예기치 않은 예외 발생: {e}.", exc_info=True)
         return b""
 
-def compress_layer(packed_data: bytes, mode: str = "none") -> Optional[bytes]:
+def compress_layer(packed_data: bytes, mode: str = "raw") -> Optional[bytes]:
     """
     압축/인코딩 레이어. 선택된 모드에 따라 데이터를 변환합니다.
-    - "none": 아무 처리 없이 원본 데이터를 반환합니다 (raw).
-    - "bam": 향후 구현될 BAM 인코더를 위한 인터페이스 (현재는 원본 데이터 반환).
+    - "raw": 아무 처리 없이 원본 데이터를 반환합니다.
+    - "bam": 향후 구현될 BAM 인코더를 위한 인터페이스.
     """
-    if mode == "none":
-        logger.debug(f"압축 모드 'none': 원본 데이터 {len(packed_data)}B 사용.")
+    if mode == "raw":
+        logger.debug(f"압축 모드 'raw': 원본 데이터 {len(packed_data)}B 사용.")
         return packed_data
     
     elif mode == "bam":
@@ -82,27 +78,43 @@ def compress_layer(packed_data: bytes, mode: str = "none") -> Optional[bytes]:
         logger.error(f"알 수 없는 압축 모드: '{mode}'.")
         return None
 
-def create_frame(sample: Dict[str, Any], message_seq: int, compression_mode: str) -> Optional[bytes]:
+def create_frame(sample: Dict[str, Any], message_seq: int, compression_mode: str, payload_size: int = 0) -> Optional[bytes]:
     """
-    센서 샘플로부터 최종 전송 프레임(콘텐츠)을 생성하는 단일 인터페이스.
-    [ MESSAGE_SEQ (1B) | PAYLOAD_CHUNK ]
+    센서 샘플로부터 최종 전송 프레임(콘텐츠)을 생성합니다.
+    - payload_size == 0: 센서 데이터를 인코딩하여 페이로드 생성.
+    - payload_size > 0: 해당 크기의 더미 데이터로만 페이로드 생성.
+
+    프레임 구조: [ MESSAGE_SEQ (1B) | PAYLOAD_CHUNK ]
     """
-    # 1. 데이터를 raw 바이너리로 패킹
-    packed_blob = _pack_data(sample)
-    if not packed_blob:
-        logger.warning(f"MESSAGE_SEQ {message_seq}: 데이터 패킹 실패. 빈 프레임 반환.")
-        return None
-        
-    # 2. 선택된 압축/인코딩 레이어 적용
-    payload_chunk = compress_layer(packed_blob, mode=compression_mode)
-    if payload_chunk is None:
-        logger.error(f"MESSAGE_SEQ {message_seq}: 압축/인코딩 레이어 실패. 빈 프레임 반환.")
+    payload_chunk = b''
+
+    if payload_size == 0:
+        # 1. 센서 데이터 기반 페이로드 생성
+        packed_blob = _pack_data(sample)
+        if not packed_blob:
+            logger.warning(f"MESSAGE_SEQ {message_seq}: 데이터 패킹 실패. 빈 프레임 반환.")
+            return None
+
+        # 2. 선택된 압축/인코딩 레이어 적용
+        payload_chunk = compress_layer(packed_blob, mode=compression_mode)
+        if payload_chunk is None:
+            logger.error(f"MESSAGE_SEQ {message_seq}: 압축/인코딩 레이어 실패. 빈 프레임 반환.")
+            return None
+        logger.debug(f"센서 데이터 페이로드 생성됨: {len(payload_chunk)}B")
+
+    elif payload_size > 0:
+        # 3. 더미 데이터 기반 페이로드 생성
+        payload_chunk = os.urandom(payload_size)
+        logger.debug(f"더미 데이터 페이로드 생성됨: {len(payload_chunk)}B")
+
+    else:
+        logger.error(f"잘못된 payload_size: {payload_size}")
         return None
 
-    # 3. 프레임 콘텐츠 생성: [SEQ | PAYLOAD]
+    # 4. 프레임 콘텐츠 생성: [SEQ | PAYLOAD]
     frame_content = bytes([message_seq % 256]) + payload_chunk
 
-    # 4. 프레임 크기 확인 및 자르기
+    # 5. 프레임 크기 확인 및 자르기
     if len(frame_content) > MAX_FRAME_CONTENT_SIZE:
         logger.warning(
             f"생성된 프레임 콘텐츠({len(frame_content)}B)가 최대 크기({MAX_FRAME_CONTENT_SIZE}B)를 초과. "
@@ -110,5 +122,7 @@ def create_frame(sample: Dict[str, Any], message_seq: int, compression_mode: str
         )
         frame_content = frame_content[:MAX_FRAME_CONTENT_SIZE]
 
-    logger.debug(f"프레임 생성 완료 (mode: {compression_mode}): MESSAGE_SEQ={message_seq % 256}, 최종 콘텐츠 길이={len(frame_content)}B")
+    log_mode = "Sensor Data" if payload_size == 0 else f"Dummy Data ({payload_size}B)"
+    logger.debug(f"프레임 생성 완료 (mode: {compression_mode}, payload: {log_mode}): "
+                 f"MESSAGE_SEQ={message_seq % 256}, 최종 콘텐츠 길이={len(frame_content)}B")
     return frame_content
