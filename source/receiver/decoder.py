@@ -1,95 +1,97 @@
 # decoder.py
 # -*- coding: utf-8 -*-
 """
-zlib‑압축, struct 포맷 해제 → dict 복원
-포맷·스케일 값은 encoder.py 와 반드시 동일해야 함
+수신된 페이로드를 디코딩하여 원본 데이터 딕셔너리로 복원합니다.
+인코딩 방식('none', 'bam' 등)을 자동으로 감지하거나, 외부에서 지정받아 처리합니다.
 """
 from __future__ import annotations
-import struct, zlib, logging
+import struct
+import logging
 from typing import Dict, Any, Optional
+
+# 만약 BAM 구현이 numpy 등을 사용한다면 여기에 임포트
+# import numpy as np 
 
 logger = logging.getLogger(__name__)
 
-# encoder.py의 _FMT와 정확히 일치해야 함
-# <Ihhhhhhhhhffh (ts, MPU 9개, lat, lon, altitude)
-_FMT = "<Ihhhhhhhhhffh"  # 마지막 'h'가 고도
-
-# encoder.py의 _FIELDS 순서 및 스케일과 일치해야 함
-# 고도(altitude)는 encoder에서 10을 곱해서 short로 저장했으므로,
-# 여기서 10.0으로 나누어 float으로 복원
-_SCALES = (
-    1,       # ts
-    1000,    # ax
-    1000,    # ay
-    1000,    # az
-    10,      # gx
-    10,      # gy
-    10,      # gz
-    10,      # roll
-    10,      # pitch
-    10,      # yaw
-    1.0,     # lat (float)
-    1.0,     # lon (float)
-    10.0     # altitude (short를 10.0으로 나눠 float 복원)
+# --- 'none' 모드 (raw 데이터)를 위한 설정 ---
+_RAW_FMT = "<Ihhhhhhhhhffh"
+_RAW_SCALES = (
+    1, 1000, 1000, 1000, 10, 10, 10, 10, 10, 10, 1.0, 1.0, 10.0
 )
+_RAW_EXPECTED_LEN = struct.calcsize(_RAW_FMT) # 34 바이트
 
-def decompress_data(buf: bytes) -> Optional[Dict[str, Any]]:
+# --- BAM 관련 설정 및 함수 (예시) ---
+# BAM 네트워크의 가중치 행렬 등은 미리 학습되어 파일로 저장되어 있어야 합니다.
+# BAM_WEIGHT_MATRIX = np.load('bam_weights.npy') # 예시
+
+def _decode_bam_payload(payload_chunk: bytes) -> Optional[bytes]:
+    """
+    BAM으로 인코딩된 페이로드를 디코딩하여 원본 raw 바이너리 데이터로 복원합니다.
+    (이 함수는 BAM 구현에 따라 완전히 달라집니다)
+    """
+    logger.debug(f"BAM 디코딩 시도 (페이로드 길이: {len(payload_chunk)}B)...")
+    
+    # --- 여기에 실제 BAM 디코딩 로직을 구현합니다 ---
+    # 1. 수신된 payload_chunk를 BAM 입력 벡터 형식으로 변환 (예: numpy 배열)
+    # bam_input_vector = np.frombuffer(payload_chunk, dtype=np.int8)
+
+    # 2. BAM 네트워크를 통해 원본 데이터 복원 (가중치 행렬 사용)
+    # restored_vector = bam_decode(bam_input_vector, BAM_WEIGHT_MATRIX)
+    
+    # 3. 복원된 벡터를 원본 바이너리 데이터(bytes)로 변환
+    # restored_raw_bytes = restored_vector.tobytes()
+    
+    # 지금은 BAM이 구현되지 않았으므로 에러를 반환합니다.
+    logger.error("BAM 디코딩 로직이 아직 구현되지 않았습니다.")
+    return None # 실제 구현 시 복원된 바이트를 반환해야 함
+
+def _decode_raw_payload(payload_chunk: bytes) -> Optional[Dict[str, Any]]:
+    """struct로 패킹된 raw 페이로드를 디코딩합니다."""
+    if len(payload_chunk) != _RAW_EXPECTED_LEN:
+        logger.error(f"Raw 디코딩 실패: 길이 불일치. 기대: {_RAW_EXPECTED_LEN}B, 실제: {len(payload_chunk)}B.")
+        return None
+    
     try:
-        # 1. 압축 해제
-        decompressed_buf = zlib.decompress(buf)
-
-        # 2. 압축 해제된 데이터의 길이 검사
-        expected_len = struct.calcsize(_FMT)
-        if len(decompressed_buf) != expected_len:
-            logger.error(f"복원 실패: 압축 해제된 데이터 길이 불일치. 기대: {expected_len}B, 실제: {len(decompressed_buf)}B. (Input buf len: {len(buf)}B)")
-            return None
-
-        # 3. 언패킹
-        unpacked_values = struct.unpack(_FMT, decompressed_buf)
-        
-        # 4. 스케일링 및 변수 할당 (encoder.py의 _FIELDS 순서와 동일하게)
-        # ts, ax, ay, az, gx, gy, gz, roll, pitch, yaw, lat, lon, altitude
-        # 총 13개 값
-        if len(unpacked_values) != len(_SCALES):
-             logger.error(f"복원 실패: 언패킹된 값의 개수({len(unpacked_values)})와 스케일 개수({len(_SCALES)}) 불일치.")
-             return None
-
-        scaled_values = [u / s for u, s in zip(unpacked_values, _SCALES)]
-        
-        ts_val = scaled_values[0]
-        ax_val = scaled_values[1]
-        ay_val = scaled_values[2]
-        az_val = scaled_values[3]
-        gx_val = scaled_values[4]
-        gy_val = scaled_values[5]
-        gz_val = scaled_values[6]
-        roll_val = scaled_values[7]
-        pitch_val = scaled_values[8]
-        yaw_val = scaled_values[9]
-        lat_val = scaled_values[10]
-        lon_val = scaled_values[11]
-        alt_val = scaled_values[12] # 새로 추가된 고도 값
-
-        # 5. 결과 딕셔너리 생성
+        unpacked = struct.unpack(_RAW_FMT, payload_chunk)
+        scaled = [u / s for u, s in zip(unpacked, _RAW_SCALES)]
         return {
-            "ts": ts_val,
-            "accel": {"ax": ax_val, "ay": ay_val, "az": az_val},
-            "gyro":  {"gx": gx_val, "gy": gy_val, "gz": gz_val},
-            "angle": {"roll": roll_val, "pitch": pitch_val, "yaw": yaw_val},
-            "gps":   {
-                "lat": lat_val,
-                "lon": lon_val,
-                "altitude": alt_val # 고도 데이터 추가
-            },
+            "ts": scaled[0],
+            "accel": {"ax": scaled[1], "ay": scaled[2], "az": scaled[3]},
+            "gyro":  {"gx": scaled[4], "gy": scaled[5], "gz": scaled[6]},
+            "angle": {"roll": scaled[7], "pitch": scaled[8], "yaw": scaled[9]},
+            "gps":   {"lat": scaled[10], "lon": scaled[11], "altitude": scaled[12]},
         }
-    except zlib.error as e:
-        logger.error(f"Zlib 압축 해제 실패: {e}. (Input buf len: {len(buf)}B)")
-        return None
     except struct.error as e:
-        # decompressed_buf가 정의되었는지 확인 후 로깅
-        decomp_len_str = str(len(decompressed_buf)) if 'decompressed_buf' in locals() else 'N/A (decompression failed)'
-        logger.error(f"Struct 언패킹 실패: {e}. 압축 해제된 buf 길이: {decomp_len_str} (기대: {struct.calcsize(_FMT)}B). (Input buf len: {len(buf)}B)")
+        logger.error(f"Raw 데이터 언패킹 실패: {e}")
         return None
-    except Exception as e:
-        logger.error(f"예기치 않은 복원 실패: {e}. (Input buf len: {len(buf)}B)", exc_info=True) # 상세한 오류를 위해 exc_info 추가
-        return None
+
+def decode_frame_payload(payload_chunk: bytes) -> Optional[Dict[str, Any]]:
+    """
+    수신된 프레임 페이로드를 디코딩하여 데이터 딕셔너리로 복원합니다.
+    페이로드의 길이를 보고 인코딩 방식을 추측합니다.
+    """
+    # --- 인코딩 방식 감지 로직 ---
+    # 'none' 모드는 항상 고정된 길이(_RAW_EXPECTED_LEN)를 가집니다.
+    # BAM은 다른 길이를 가질 것입니다.
+    
+    payload_len = len(payload_chunk)
+    
+    if payload_len == _RAW_EXPECTED_LEN:
+        # 길이가 raw 데이터 길이와 일치하면 'none' 모드로 간주
+        logger.debug("페이로드 길이가 raw 데이터 길이와 일치하여 'none' 모드로 디코딩합니다.")
+        return _decode_raw_payload(payload_chunk)
+        
+    else:
+        # 그 외의 길이는 'bam' 모드로 간주
+        logger.debug(f"페이로드 길이가 raw 데이터 길이와 달라({payload_len}B), 'bam' 모드로 디코딩을 시도합니다.")
+        
+        # 1. BAM 페이로드를 raw 바이너리로 복원
+        restored_raw_bytes = _decode_bam_payload(payload_chunk)
+        
+        if restored_raw_bytes is None:
+            logger.error("BAM 페이로드 복원에 실패했습니다.")
+            return None
+            
+        # 2. 복원된 raw 바이너리를 최종 딕셔너리로 변환
+        return _decode_raw_payload(restored_raw_bytes)

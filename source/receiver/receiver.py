@@ -13,7 +13,8 @@ import binascii
 from typing import List, Optional, Dict, Any
 
 try:
-    import decoder # 같은 폴더에 있다고 가정
+    # 변경된 함수 이름 임포트
+    from decoder import decode_frame_payload
 except ImportError as e:
     print(f"모듈 임포트 실패: {e}. decoder.py가 같은 폴더에 있는지 확인하세요.")
     exit(1)
@@ -46,39 +47,33 @@ ACK_TYPE_SEND_PERMIT  = 0x55
 ACK_PACKET_LEN     = 2
 HANDSHAKE_ACK_SEQ  = 0x00
 
-# --- PDR 계산을 위한 기대 총 패킷 수 ---
-# 사용자가 언급한 값 또는 실제 실험 환경에 맞게 수정하세요.
+# PDR 계산을 위한 기대 총 패킷 수
 EXPECTED_TOTAL_PACKETS = 200
-# --- PDR 계산을 위한 기대 총 패킷 수 끝 ---
-
 
 # --- 로거 초기화 ---
 logging.basicConfig(level=logging.INFO,
                     format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
                     datefmt="%Y-%m-%d %H:%M:%S")
 logger = logging.getLogger(__name__)
-# logging.getLogger('decoder').setLevel(logging.DEBUG)
-# --- 로거 초기화 끝 ---
 
-# IGNORED_MODULE_BYTES 리스트는 더 이상 사용하지 않음
-
-# --- VALID_DATA_PKT_LENGTH_RANGE 정의 ---
-MIN_COMPRESSED_PAYLOAD_LEN = 5
-MAX_PAYLOAD_CHUNK_FROM_ENCODER = 56
-NEW_MIN_FRAME_CONTENT_LEN = 1 + MIN_COMPRESSED_PAYLOAD_LEN
-NEW_FRAME_MAX_CONTENT_LEN = 1 + MAX_PAYLOAD_CHUNK_FROM_ENCODER
-VALID_DATA_PKT_LENGTH_RANGE = range(NEW_MIN_FRAME_CONTENT_LEN, NEW_FRAME_MAX_CONTENT_LEN + 1)
+# --- VALID_DATA_PKT_LENGTH_RANGE 정의 (압축이 없으므로 길이가 고정됨) ---
+# encoder._FMT의 크기는 struct.calcsize("<Ihhhhhhhhhffh") = 34바이트 입니다.
+# 여기에 시퀀스 번호 1바이트를 더하면 35바이트가 됩니다.
+# 이는 'none' 모드일 때의 고정 길이입니다.
+# BAM은 길이가 달라질 수 있으므로, 범위를 넓게 잡습니다.
+MIN_PAYLOAD_LEN = 10 # 최소 페이로드 길이 (임의의 값, BAM 구현에 따라 조정)
+MAX_PAYLOAD_LEN = 56 # encoder.MAX_FRAME_CONTENT_SIZE - 1 (SEQ 바이트 제외)
+VALID_DATA_PKT_LENGTH_RANGE = range(1 + MIN_PAYLOAD_LEN, 1 + MAX_PAYLOAD_LEN + 1)
 logger.info(f"수신 유효 데이터 프레임 콘텐츠 길이 범위(LENGTH 바이트 값): {list(VALID_DATA_PKT_LENGTH_RANGE)}")
 # --- VALID_DATA_PKT_LENGTH_RANGE 정의 끝 ---
 
-KNOWN_CONTROL_TYPES_FROM_SENDER = [QUERY_TYPE_SEND_REQUEST] # 현재 0x50만 해당
+KNOWN_CONTROL_TYPES_FROM_SENDER = [QUERY_TYPE_SEND_REQUEST] # 0x50
 
-DATA_DIR     = "data/raw"
+DATA_DIR = "data/raw"
 os.makedirs(DATA_DIR, exist_ok=True)
 
 def bytes_to_hex_pretty_str(data_bytes: bytes, bytes_per_line: int = 16) -> str:
-    if not data_bytes:
-        return "<empty>"
+    if not data_bytes: return "<empty>"
     hex_str = binascii.hexlify(data_bytes).decode('ascii')
     lines: List[str] = []
     for i in range(0, len(hex_str), bytes_per_line * 2):
@@ -137,12 +132,13 @@ def receive_loop():
         rx_logger.log_rx_event(event_type="SERIAL_PORT_OPEN_FAIL", notes=f"Port: {PORT}, Error: {e}")
         return
 
+    # --- 핸드셰이크 루프 ---
     handshake_success = False
     while not handshake_success:
         logger.info(f"SYN ('{SYN_MSG!r}') 대기 중 (Timeout: {ser.timeout}s)...")
         try:
             if ser.in_waiting > 0:
-                ser.reset_input_buffer() 
+                ser.reset_input_buffer()
                 logger.debug("핸드셰이크 시도 전 입력 버퍼 초기화됨.")
             
             line = ser.readline()
@@ -171,183 +167,124 @@ def receive_loop():
     if not handshake_success:
         logger.error("핸드셰이크 최종 실패. 프로그램 종료.")
         rx_logger.log_rx_event(event_type="HANDSHAKE_FINAL_FAIL")
-        if ser and ser.is_open:
-            ser.close()
+        if ser and ser.is_open: ser.close()
         return
 
+    # --- 메인 수신 루프 ---
     ser.timeout = SERIAL_READ_TIMEOUT
-    logger.info(f"핸드셰이크 완료. 데이터 수신 대기 중... (timeout={ser.timeout}s, inter_byte_timeout={ser.inter_byte_timeout}s)")
-
+    logger.info(f"핸드셰이크 완료. 데이터 수신 대기 중... (timeout={ser.timeout}s)")
+    
     received_message_count = 0
-    # PDR 계산을 위해 루프 외부에서 정의된 상수를 사용
     expected_total_packets_for_pdr = EXPECTED_TOTAL_PACKETS
     
     try:
         while True:
             first_byte_data = ser.read(1)
-
-            if not first_byte_data:
-                continue
-
-            first_byte_val = first_byte_data[0]
+            if not first_byte_data: continue
             
+            first_byte_val = first_byte_data[0]
+            first_byte_hex_str = f"0x{first_byte_val:02x}"
+
+            # --- 제어 패킷 처리 ---
             if first_byte_val in KNOWN_CONTROL_TYPES_FROM_SENDER:
-                packet_type = first_byte_val
-                first_byte_hex_str = f"0x{packet_type:02x}"
-                
                 sequence_byte_data = ser.read(1)
                 if sequence_byte_data:
                     sequence_num = sequence_byte_data[0]
-                    type_name_str = "QUERY_SEND_REQUEST" if packet_type == QUERY_TYPE_SEND_REQUEST else f"UNKNOWN_CTRL_0x{packet_type:02x}"
-                    logger.info(f"제어 패킷 수신: TYPE={type_name_str} ({first_byte_hex_str}), SEQ=0x{sequence_num:02x}")
+                    type_name_str = "QUERY_SEND_REQUEST" if first_byte_val == QUERY_TYPE_SEND_REQUEST else f"UNKNOWN_CTRL_{first_byte_hex_str}"
+                    logger.info(f"제어 패킷 수신: TYPE={type_name_str}, SEQ=0x{sequence_num:02x}")
                     rx_logger.log_rx_event(event_type="CTRL_PKT_RECV", packet_type_recv_hex=first_byte_hex_str, frame_seq_recv=sequence_num)
 
-                    if packet_type == QUERY_TYPE_SEND_REQUEST:
-                        logger.debug(f"  송신 요청(SEQ=0x{sequence_num:02x})에 대해 송신 허가(PERMIT ACK) 응답 전송.")
+                    if first_byte_val == QUERY_TYPE_SEND_REQUEST:
                         _send_control_response(ser, sequence_num, ACK_TYPE_SEND_PERMIT)
                 else:
-                    logger.warning(f"제어 패킷의 시퀀스 번호 수신 실패 (TYPE={first_byte_hex_str} 이후 데이터 없음 또는 타임아웃).")
+                    logger.warning(f"제어 패킷의 시퀀스 번호 수신 실패 (TYPE={first_byte_hex_str}).")
                     rx_logger.log_rx_event(event_type="CTRL_PKT_INCOMPLETE_SEQ", packet_type_recv_hex=first_byte_hex_str)
-                    if ser.in_waiting > 0:
-                        junk = ser.read(ser.in_waiting)
-                        logger.debug(f"  제어 패킷 불완전 수신 후 버려진 데이터 ({len(junk)}B): {bytes_to_hex_pretty_str(junk)}")
                 continue 
-
+            
+            # --- 데이터 패킷 처리 ---
             elif first_byte_val in VALID_DATA_PKT_LENGTH_RANGE:
-                actual_content_len_from_length_byte = first_byte_val 
-                first_byte_hex_str = f"0x{first_byte_val:02x}"
-                logger.debug(f"데이터 패킷 길이(LENGTH) 바이트 수신: {actual_content_len_from_length_byte} ({first_byte_hex_str}) - 유효 범위 내.")
-                rx_logger.log_rx_event(event_type="DATA_LEN_BYTE_RECV", packet_type_recv_hex=f"LEN_{first_byte_hex_str}", data_len_byte_value=actual_content_len_from_length_byte)
+                content_len = first_byte_val
+                logger.debug(f"데이터 패킷 길이(LENGTH) 바이트 수신: {content_len} ({first_byte_hex_str})")
+                rx_logger.log_rx_event(event_type="DATA_LEN_BYTE_RECV", data_len_byte_value=content_len)
 
-                actual_content_bytes = ser.read(actual_content_len_from_length_byte)
-
-                rssi_raw_value: Optional[int] = None
-                rssi_dbm_value: Optional[int] = None
+                content_bytes = ser.read(content_len)
                 
-                if len(actual_content_bytes) == actual_content_len_from_length_byte:
-                    rssi_byte_data = ser.read(1) 
-                    if rssi_byte_data:
-                        rssi_raw_value = rssi_byte_data[0]
-                        try:
-                            rssi_dbm_value = -(256 - rssi_raw_value) 
-                        except TypeError:
-                            rssi_dbm_value = None
-                        logger.debug(f"RSSI 바이트 수신: Raw=0x{rssi_raw_value:02x} ({rssi_raw_value}), 추정 dBm={rssi_dbm_value}")
-                    else:
-                        logger.debug("RSSI 바이트 수신 실패 (타임아웃 또는 데이터 없음).")
+                # RSSI 읽기
+                rssi_raw, rssi_dbm = None, None
+                if len(content_bytes) == content_len:
+                    rssi_byte = ser.read(1)
+                    if rssi_byte:
+                        rssi_raw = rssi_byte[0]
+                        rssi_dbm = -(256 - rssi_raw)
                 
-                if len(actual_content_bytes) == actual_content_len_from_length_byte:
-                    actual_seq = actual_content_bytes[0]
-                    payload_chunk_from_actual_frame = actual_content_bytes[1:]
+                # 데이터 프레임 내용 검증 및 처리
+                if len(content_bytes) == content_len:
+                    frame_seq = content_bytes[0]
+                    payload_chunk = content_bytes[1:]
+                    
+                    rssi_info_str = f", RSSI={rssi_dbm}dBm" if rssi_dbm is not None else ""
+                    logger.info(f"데이터 프레임 수신: LENGTH={content_len}B, FRAME_SEQ=0x{frame_seq:02x}, PAYLOAD_LEN={len(payload_chunk)}B{rssi_info_str}")
+                    rx_logger.log_rx_event(event_type="DATA_FRAME_RECV_FULL", frame_seq_recv=frame_seq, data_len_byte_value=content_len, rssi_dbm=rssi_dbm)
 
-                    rssi_info_str = ""
-                    if rssi_raw_value is not None and rssi_dbm_value is not None:
-                        rssi_info_str = f", RSSI_RAW=0x{rssi_raw_value:02x}, RSSI_dBm={rssi_dbm_value}dBm"
-                    
-                    total_bytes_on_air_estimate = 1 + actual_content_len_from_length_byte + (1 if rssi_raw_value is not None else 0)
-                    logger.info(f"데이터 프레임 수신: 총수신추정={total_bytes_on_air_estimate}B, LENGTH값={actual_content_len_from_length_byte}B, FRAME_SEQ=0x{actual_seq:02x}, PAYLOAD_LEN={len(payload_chunk_from_actual_frame)}B{rssi_info_str}")
-                    rx_logger.log_rx_event(event_type="DATA_FRAME_RECV_FULL", packet_type_recv_hex="DATA_FRAME", frame_seq_recv=actual_seq, 
-                                 data_len_byte_value=actual_content_len_from_length_byte, 
-                                 payload_len_on_wire=len(payload_chunk_from_actual_frame), 
-                                 rssi_dbm=rssi_dbm_value)
-                    
                     if logger.isEnabledFor(logging.DEBUG):
-                         logger.debug(f"  수신된 페이로드 데이터 (압축됨):\n  {bytes_to_hex_pretty_str(payload_chunk_from_actual_frame)}")
+                        logger.debug(f"  수신된 페이로드 데이터:\n  {bytes_to_hex_pretty_str(payload_chunk)}")
 
-                    _send_control_response(ser, actual_seq, ACK_TYPE_DATA)
+                    # 데이터 수신 ACK 전송
+                    _send_control_response(ser, frame_seq, ACK_TYPE_DATA)
 
                     try:
-                        payload_dict = decoder.decompress_data(payload_chunk_from_actual_frame)
-                        if payload_dict is None:
-                            logger.error(f"메시지 (FRAME_SEQ: 0x{actual_seq:02x}): 디코딩 실패. PAYLOAD_LEN={len(payload_chunk_from_actual_frame)}B")
-                            rx_logger.log_rx_event(event_type="DECODE_FAIL", frame_seq_recv=actual_seq, 
-                                         payload_len_on_wire=len(payload_chunk_from_actual_frame), 
-                                         notes="decompress_data returned None")
-                            if logger.isEnabledFor(logging.DEBUG):
-                                logger.debug(f"  디코딩 실패 페이로드 HEX (압축됨):\n {bytes_to_hex_pretty_str(payload_chunk_from_actual_frame)}")
-                        else: 
-                            received_message_count += 1 # 디코딩 성공 시 카운트 증가
-                            logger.info(f"--- 메시지 #{received_message_count} (FRAME_SEQ: 0x{actual_seq:02x}) 디코딩 성공 ---")
+                        # 디코더 호출
+                        payload_dict = decode_frame_payload(payload_chunk)
 
-                            ts_value = payload_dict.get('ts', 0.0)
-                            ts_human_readable = "N/A"
-                            ts_value_display = str(ts_value)
-                            latency_ms = 0
-                            current_recv_time = time.time()
-                            is_ts_valid = False
-
-                            try:
-                                if isinstance(ts_value, (int, float)) and ts_value > 0:
-                                    ts_dt = datetime.datetime.fromtimestamp(ts_value)
-                                    ts_human_readable = ts_dt.strftime('%Y-%m-%d %H:%M:%S.%f')[:-3]
-                                    ts_value_display = f"{ts_value:.3f}"
-                                    latency_ms = int((current_recv_time - ts_value) * 1000)
-                                    is_ts_valid = True
-                            except (ValueError, TypeError, OSError) as e_ts:
-                                logger.warning(f"  타임스탬프 값 ({ts_value}) 변환 중 오류: {e_ts}")
-                                ts_human_readable = "N/A (Invalid Timestamp)"
+                        if payload_dict:
+                            received_message_count += 1
+                            logger.info(f"--- 메시지 #{received_message_count} (FRAME_SEQ: 0x{frame_seq:02x}) 디코딩 성공 ---")
                             
-                            rx_logger.log_rx_event(event_type="DECODE_SUCCESS", frame_seq_recv=actual_seq,
-                                         payload_len_on_wire=len(payload_chunk_from_actual_frame),
-                                         decoded_ts_valid=is_ts_valid, 
-                                         decoded_latency_ms=latency_ms if is_ts_valid else None,
-                                         decoded_payload_dict=payload_dict,
-                                         notes=f"Msg #{received_message_count}")
-
+                            # 데이터 처리 및 로깅
+                            ts_val = payload_dict.get('ts', 0.0)
+                            latency_ms = int((time.time() - ts_val) * 1000) if ts_val > 0 else 0
+                            
+                            rx_logger.log_rx_event(event_type="DECODE_SUCCESS", frame_seq_recv=frame_seq, decoded_latency_ms=latency_ms)
+                            
                             accel = payload_dict.get('accel', {})
                             gyro = payload_dict.get('gyro', {})
                             angle = payload_dict.get('angle', {})
                             gps = payload_dict.get('gps', {})
-
-                            def format_sensor_value(data_dict, key, fmt_str=".3f", default_val="N/A"):
-                                val = data_dict.get(key)
-                                if val is None or not isinstance(val, (int, float)): return default_val
-                                try: return format(float(val), fmt_str)
-                                except (ValueError, TypeError): return default_val
-
-                            log_lines = [
-                                f"  Timestamp: {ts_human_readable} (raw: {ts_value_display})",
-                                f"  Accel (g): Ax={format_sensor_value(accel, 'ax')}, Ay={format_sensor_value(accel, 'ay')}, Az={format_sensor_value(accel, 'az')}",
-                                f"  Gyro (°/s): Gx={format_sensor_value(gyro, 'gx', '.1f')}, Gy={format_sensor_value(gyro, 'gy', '.1f')}, Gz={format_sensor_value(gyro, 'gz', '.1f')}",
-                                f"  Angle (°): Roll={format_sensor_value(angle, 'roll', '.1f')}, Pitch={format_sensor_value(angle, 'pitch', '.1f')}, Yaw={format_sensor_value(angle, 'yaw', '.1f')}",
-                                f"  GPS: Lat={format_sensor_value(gps, 'lat', '.6f')}, Lon={format_sensor_value(gps, 'lon', '.6f')}, Alt={format_sensor_value(gps, 'altitude', '.1f')}m"
-                            ]
-                            if rssi_raw_value is not None and rssi_dbm_value is not None:
-                                log_lines.append(f"  RSSI: {rssi_dbm_value} dBm (Raw: 0x{rssi_raw_value:02x})")
                             
+                            # ... (콘솔 출력 로직) ...
+                            log_lines = [
+                                f"  Timestamp: {datetime.datetime.fromtimestamp(ts_val).strftime('%Y-%m-%d %H:%M:%S.%f')[:-3]} (Latency: {latency_ms}ms)",
+                                f"  Accel(g): Ax={accel.get('ax', 0):.3f}, Ay={accel.get('ay', 0):.3f}, Az={accel.get('az', 0):.3f}",
+                                f"  Gyro(°/s): Gx={gyro.get('gx', 0):.1f}, Gy={gyro.get('gy', 0):.1f}, Gz={gyro.get('gz', 0):.1f}",
+                                f"  Angle(°): Roll={angle.get('roll', 0):.1f}, Pitch={angle.get('pitch', 0):.1f}, Yaw={angle.get('yaw', 0):.1f}",
+                                f"  GPS: Lat={gps.get('lat', 0):.6f}, Lon={gps.get('lon', 0):.6f}, Alt={gps.get('altitude', 0):.1f}m",
+                                f"  RSSI: {rssi_dbm} dBm" if rssi_dbm is not None else "  RSSI: N/A"
+                            ]
                             for line in log_lines: logger.info(line)
+                            
+                            meta = {"recv_frame_seq": frame_seq, "latency_ms": latency_ms, "rssi_dbm": rssi_dbm}
+                            _log_json(payload_dict, meta)
+                            logger.info(f"  [OK#{received_message_count} FRAME_SEQ:0x{frame_seq:02x}] JSON 저장 완료.")
 
-                            meta_data = {
-                                "recv_frame_seq": actual_seq,
-                                "bytes_payload_on_wire": len(payload_chunk_from_actual_frame),
-                                "length_byte_value": actual_content_len_from_length_byte,
-                                "latency_ms_sensor_to_recv": latency_ms,
-                                "rssi_raw": rssi_raw_value,
-                                "rssi_dbm_estimated": rssi_dbm_value
-                            }
-                            _log_json(payload_dict, meta_data)
-                            logger.info(f"  [OK#{received_message_count} FRAME_SEQ:0x{actual_seq:02x}] Latency (sensor): {latency_ms}ms. JSON 저장됨.")
+                        else: # 디코딩 실패
+                            logger.error(f"메시지 (FRAME_SEQ: 0x{frame_seq:02x}): 디코딩 실패. PAYLOAD_LEN={len(payload_chunk)}B")
+                            rx_logger.log_rx_event(event_type="DECODE_FAIL", frame_seq_recv=frame_seq, notes="decode_frame_payload returned None")
 
-                    except Exception as e_decode_process:
-                        logger.error(f"메시지 처리(디코딩 후 로깅/저장) 중 오류 (FRAME_SEQ: 0x{actual_seq:02x}): {e_decode_process}", exc_info=True)
-                        rx_logger.log_rx_event(event_type="DECODE_PROCESS_ERROR", frame_seq_recv=actual_seq, notes=str(e_decode_process))
-                else: 
-                    logger.warning(f"데이터 프레임 내용 수신 실패: 기대 {actual_content_len_from_length_byte}B, 수신 {len(actual_content_bytes)}B. 수신된 데이터: {bytes_to_hex_pretty_str(actual_content_bytes)}")
-                    rx_logger.log_rx_event(event_type="DATA_FRAME_CONTENT_FAIL", 
-                                 data_len_byte_value=actual_content_len_from_length_byte, 
-                                 notes=f"Expected {actual_content_len_from_length_byte}B, got {len(actual_content_bytes)}B. Raw: {bytes_to_hex_pretty_str(actual_content_bytes)}")
-                    if ser.in_waiting > 0:
-                        junk = ser.read(ser.in_waiting)
-                        logger.debug(f"  데이터 프레임 불완전 수신 후 버려진 데이터 ({len(junk)}B): {bytes_to_hex_pretty_str(junk)}")
-                continue 
+                    except Exception as e_decode:
+                        logger.error(f"메시지 처리 중 오류 (FRAME_SEQ: 0x{frame_seq:02x}): {e_decode}", exc_info=True)
+                        rx_logger.log_rx_event(event_type="DECODE_PROCESS_ERROR", frame_seq_recv=frame_seq, notes=str(e_decode))
+                
+                else: # 데이터 프레임 불완전 수신
+                    logger.warning(f"데이터 프레임 내용 수신 실패: 기대 {content_len}B, 수신 {len(content_bytes)}B.")
+                    rx_logger.log_rx_event(event_type="DATA_FRAME_CONTENT_FAIL", data_len_byte_value=content_len)
+                continue
 
-            else:
-                pass 
+            # else: # 알 수 없는 첫 바이트는 무시
+            #     pass
 
     except KeyboardInterrupt:
         logger.info("수신 중단 (KeyboardInterrupt)")
         rx_logger.log_rx_event(event_type="KEYBOARD_INTERRUPT")
-
         # --- PDR 계산 및 출력 ---
         logger.info(f"--- PDR (Packet Delivery Rate) ---")
         if expected_total_packets_for_pdr > 0:
@@ -355,23 +292,11 @@ def receive_loop():
             logger.info(f"  기대 총 패킷 수: {expected_total_packets_for_pdr}")
             logger.info(f"  성공적으로 수신/디코딩된 패킷 수: {received_message_count}")
             logger.info(f"  PDR: {pdr:.2f}%")
-            rx_logger.log_rx_event(
-                event_type="PDR_CALCULATED",
-                expected_packets=expected_total_packets_for_pdr,
-                received_packets=received_message_count,
-                pdr_percentage=float(f"{pdr:.2f}") # rx_logger가 float를 잘 처리하도록 명시적 형변환
-            )
+            rx_logger.log_rx_event(event_type="PDR_CALCULATED", expected_packets=expected_total_packets_for_pdr, received_packets=received_message_count, pdr_percentage=float(f"{pdr:.2f}"))
         else:
-            logger.info(f"  기대 총 패킷 수가 0 또는 음수로 설정되어 PDR을 계산할 수 없습니다.")
+            logger.warning(f"  기대 총 패킷 수가 0이므로 PDR을 계산할 수 없습니다.")
             logger.info(f"  성공적으로 수신/디코딩된 패킷 수: {received_message_count}")
-            rx_logger.log_rx_event(
-                event_type="PDR_CALCULATION_SKIPPED",
-                expected_packets=expected_total_packets_for_pdr,
-                received_packets=received_message_count,
-                notes="Expected total packets is zero or negative."
-            )
-        # --- PDR 계산 및 출력 끝 ---
-
+    
     except Exception as e_global:
         logger.error(f"전역 예외 발생: {e_global}", exc_info=True)
         rx_logger.log_rx_event(event_type="GLOBAL_EXCEPTION", notes=str(e_global))
@@ -383,7 +308,4 @@ def receive_loop():
 
 if __name__ == "__main__":
     logging.getLogger().setLevel(logging.INFO)
-    # logging.getLogger().setLevel(logging.DEBUG) # 필요시 디버그 레벨 조정
-    # logging.getLogger('decoder').setLevel(logging.DEBUG)
-
     receive_loop()
