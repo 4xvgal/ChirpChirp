@@ -1,128 +1,159 @@
-# encoder.py
+# ChirpChirp/source/transmitter/encoder.py
 # -*- coding: utf-8 -*-
-
 from __future__ import annotations
-import struct
+import time
 import logging
+import struct
 import os
-from typing import Dict, Any, Optional
+import sys
+import numpy as np
+
+# 프로젝트 루트를 sys.path에 추가
+project_root = os.path.abspath(os.path.join(os.path.dirname(__file__), '..', '..'))
+if project_root not in sys.path:
+    sys.path.insert(0, project_root)
+
+try:
+    from source.bam_autoencoder.feature_extractor import FeatureExtractor
+    from source.bam_autoencoder.data_loader import NumpyDataLoader
+except ImportError as e:
+    print(f"CRITICAL: BAM 모듈 임포트 실패 (encoder.py): {e}. 경로를 확인하세요.")
+    FeatureExtractor = None
+    NumpyDataLoader = None
 
 logger = logging.getLogger(__name__)
 
-# _FMT와 _FIELDS는 변경 없이 그대로 사용됩니다.
-_FMT = "<Ihhhhhhhhhffh"
-_FIELDS = (
+# --- Raw 모드 설정 ---
+_RAW_FMT = "<Ihhhhhhhhhfff" # altitude float 가정 (총 34바이트)
+_RAW_FIELDS_SCALES = (
     ("ts", 1), ("accel.ax", 1000), ("accel.ay", 1000), ("accel.az", 1000),
     ("gyro.gx", 10), ("gyro.gy", 10), ("gyro.gz", 10),
     ("angle.roll", 10), ("angle.pitch", 10), ("angle.yaw", 10),
-    ("gps.lat", 1.0), ("gps.lon", 1.0), ("gps.altitude", 10)
+    ("gps.lat", 1.0), ("gps.lon", 1.0), ("gps.altitude", 1.0)
 )
-
 MAX_FRAME_CONTENT_SIZE = 57
 
-def _extract(src: Dict[str, Any], dotted: str):
-    """점(.)으로 구분된 경로 문자열을 사용하여 중첩된 딕셔너리에서 값을 추출합니다."""
-    parts = dotted.split('.')
-    v = src
+# --- BAM 모델 및 스케일러 초기화 ---
+BAM_AUTOENCODER = None
+SCALER = None
+MODEL_INITIALIZED = False
+# ⚠️ 학습 시 run_compression_experiment.py에서 사용한 MF_LAYER_DIMS와 동일하게!
+# 예시: MF_LAYER_DIMS = [12, 16, 10, 8] (입력 12, 은닉1 16, 은닉2 10, 잠재 8)
+ENCODER_MF_LAYER_DIMS = [12, 24, 16, 8] # <--- 실제 학습된 아키텍처로 수정!
+ENCODER_WEIGHTS_PATH = 'data/bam_autoencoder_weights'
+ENCODER_SCALER_DATA_PATH = 'data/original/clean_lora_data_combined.csv'
+
+def initialize_bam_encoder_interface():
+    global BAM_AUTOENCODER, SCALER, MODEL_INITIALIZED
+    if MODEL_INITIALIZED: return
+    if FeatureExtractor is None or NumpyDataLoader is None:
+        logger.error("BAM 관련 모듈 임포트 불가. 인코더 초기화 실패.")
+        return
+    try:
+        logger.info("BAM 인코더 인터페이스 초기화 시도...")
+        autoencoder_model = FeatureExtractor(layer_dims=ENCODER_MF_LAYER_DIMS)
+        weights_full_path = os.path.join(project_root, ENCODER_WEIGHTS_PATH)
+        
+        for i, layer in enumerate(autoencoder_model.layers):
+            weight_file = os.path.join(weights_full_path, f'mf_layer_{i}_weights.npz') # mf_ 접두사 있는 파일명
+            if not os.path.exists(weight_file):
+                logger.error(f"가중치 파일 없음: {weight_file}")
+                MODEL_INITIALIZED = False; return
+            data = np.load(weight_file)
+            layer.W = data['W']; layer.V = data['V']
+        BAM_AUTOENCODER = autoencoder_model
+        logger.info("✅ Encoder: BAM 모델 가중치 로드 성공.")
+
+        scaler_data_full_path = os.path.join(project_root, ENCODER_SCALER_DATA_PATH)
+        if not os.path.exists(scaler_data_full_path):
+            logger.error(f"스케일러 학습용 데이터 파일 없음: {scaler_data_full_path}")
+            MODEL_INITIALIZED = False; return
+        temp_loader = NumpyDataLoader(filepath=scaler_data_full_path, batch_size=1, test_size=0.999)
+        SCALER = temp_loader.scaler
+        logger.info("✅ Encoder: 데이터 스케일러 준비 완료.")
+        MODEL_INITIALIZED = True
+        logger.info("✅ BAM 인코더 인터페이스 초기화 성공!")
+    except Exception as e:
+        logger.error(f"BAM 인코더 인터페이스 초기화 실패: {e}", exc_info=True)
+        BAM_AUTOENCODER = None; SCALER = None; MODEL_INITIALIZED = False
+
+initialize_bam_encoder_interface()
+
+def _extract(src: Dict[str, Any], dotted: str, default_val=0.0):
+    parts = dotted.split('.'); v = src
     for p_idx, p in enumerate(parts):
-        try:
-            v = v[p]
-        except KeyError:
-            missing_path = ".".join(parts[:p_idx+1])
-            raise KeyError(f"키 '{missing_path}'가 데이터에 없습니다. 전체 경로: '{dotted}'")
-        except TypeError:
-             missing_path = ".".join(parts[:p_idx+1])
-             raise TypeError(f"'{missing_path}' (값: {v})는 딕셔너리가 아니므로 '{p}' 키를 찾을 수 없습니다.")
+        try: v = v[p]
+        except (KeyError, TypeError): return default_val
     return v
 
-def _pack_data(data: Dict[str, Any]) -> bytes:
-    """센서 데이터를 struct.pack을 사용하여 raw 바이너리 데이터로 변환합니다."""
+def _pack_raw_data(data: Dict[str, Any]) -> bytes:
     try:
         values_to_pack = []
-        for field_path, scale in _FIELDS:
+        for field_path, scale in _RAW_FIELDS_SCALES:
             raw_value = _extract(data, field_path)
-            if field_path in ("ts", "gps.lat", "gps.lon"):
-                values_to_pack.append(float(raw_value) if field_path != "ts" else int(float(raw_value)))
-            else:
-                values_to_pack.append(int(float(raw_value) * scale))
-
-        packed = struct.pack(_FMT, *values_to_pack)
-        logger.debug(f"데이터 패킹 완료: 원본 {len(packed)}B. (ts: {data.get('ts')})")
-        return packed
-
-    except (KeyError, TypeError, ValueError) as e:
-        logger.warning(f"_pack_data: 데이터 처리 오류 {e}. 빈 바이트 반환.")
-        return b""
+            if field_path == "ts": values_to_pack.append(int(float(raw_value)))
+            elif field_path.startswith("gps."): values_to_pack.append(float(raw_value))
+            else: values_to_pack.append(int(float(raw_value) * scale))
+        return struct.pack(_RAW_FMT, *values_to_pack)
     except Exception as e:
-        logger.error(f"_pack_data: 예기치 않은 예외 발생: {e}.", exc_info=True)
-        return b""
+        logger.error(f"Raw 데이터 패킹 오류: {e}", exc_info=True)
+        return b'\x00' * struct.calcsize(_RAW_FMT)
 
-def compress_layer(packed_data: bytes, mode: str = "raw") -> Optional[bytes]:
-    """
-    압축/인코딩 레이어. 선택된 모드에 따라 데이터를 변환합니다.
-    - "raw": 아무 처리 없이 원본 데이터를 반환합니다.
-    - "bam": 향후 구현될 BAM 인코더를 위한 인터페이스.
-    """
-    if mode == "raw":
-        logger.debug(f"압축 모드 'raw': 원본 데이터 {len(packed_data)}B 사용.")
-        return packed_data
-    
-    elif mode == "bam":
-        # --- BAM 인코딩 로직을 여기에 구현 ---
-        logger.warning("압축 모드 'bam'이 선택되었으나 아직 구현되지 않았습니다. 원본 데이터를 사용합니다.")
-        # encoded_data = bam_encode(packed_data) # 예시
-        # return encoded_data
-        return packed_data # 임시로 원본 반환
+def _encode_bam_data(sample_dict: Dict[str, Any]) -> Optional[bytes]:
+    if not MODEL_INITIALIZED or not BAM_AUTOENCODER or not SCALER:
+        logger.error("BAM 인코더가 초기화되지 않았습니다.")
+        return None
+    try:
+        feature_values = [
+            _extract(sample_dict, "accel.ax"), _extract(sample_dict, "accel.ay"), _extract(sample_dict, "accel.az"),
+            _extract(sample_dict, "gyro.gx"), _extract(sample_dict, "gyro.gy"), _extract(sample_dict, "gyro.gz"),
+            _extract(sample_dict, "angle.roll"), _extract(sample_dict, "angle.pitch"), _extract(sample_dict, "angle.yaw"),
+            _extract(sample_dict, "gps.lat"), _extract(sample_dict, "gps.lon"), _extract(sample_dict, "gps.altitude")
+        ]
+        sensor_array = np.array([feature_values], dtype=np.float32)
+        scaled_data = SCALER.transform(sensor_array)
+        latent_vector_float = BAM_AUTOENCODER.predict(scaled_data).flatten()
+
+        # --- 16비트 양자화 (Float -> 16-bit Signed Int) ---
+        latent_vector_quantized = []
+        for val in latent_vector_float:
+            quantized_val = int(round(np.clip(val, -1.0, 1.0) * 32767))
+            latent_vector_quantized.append(quantized_val)
         
-    else:
-        logger.error(f"알 수 없는 압축 모드: '{mode}'.")
+        ts_val = int(_extract(sample_dict, "ts", default_val=time.time()))
+        
+        # --- 패킹: 타임스탬프(I, 4B) + 잠재벡터(h, 2B) * N개 ---
+        # Little-endian '<', Unsigned Int 'I', N Signed Shorts 'h'
+        pack_format = f'<I{len(latent_vector_quantized)}h' 
+        payload_bytes = struct.pack(pack_format, ts_val, *latent_vector_quantized)
+        
+        logger.info(f"BAM 모드(16b 양자화): 원본(raw) 약 {struct.calcsize(_RAW_FMT)}B -> 압축 {len(payload_bytes)}B (ts포함)")
+        return payload_bytes
+
+    except Exception as e:
+        logger.error(f"BAM 인코딩(16b 양자화) 중 오류: {e}", exc_info=True)
         return None
 
 def create_frame(sample: Dict[str, Any], message_seq: int, compression_mode: str, payload_size: int = 0) -> Optional[bytes]:
-    """
-    센서 샘플로부터 최종 전송 프레임(콘텐츠)을 생성합니다.
-    - payload_size == 0: 센서 데이터를 인코딩하여 페이로드 생성.
-    - payload_size > 0: 해당 크기의 더미 데이터로만 페이로드 생성.
-
-    프레임 구조: [ MESSAGE_SEQ (1B) | PAYLOAD_CHUNK ]
-    """
     payload_chunk = b''
-
     if payload_size == 0:
-        # 1. 센서 데이터 기반 페이로드 생성
-        packed_blob = _pack_data(sample)
-        if not packed_blob:
-            logger.warning(f"MESSAGE_SEQ {message_seq}: 데이터 패킹 실패. 빈 프레임 반환.")
-            return None
-
-        # 2. 선택된 압축/인코딩 레이어 적용
-        payload_chunk = compress_layer(packed_blob, mode=compression_mode)
-        if payload_chunk is None:
-            logger.error(f"MESSAGE_SEQ {message_seq}: 압축/인코딩 레이어 실패. 빈 프레임 반환.")
-            return None
-        logger.debug(f"센서 데이터 페이로드 생성됨: {len(payload_chunk)}B")
-
+        if compression_mode == "raw":
+            payload_chunk = _pack_raw_data(sample)
+            if not payload_chunk : return None
+        elif compression_mode == "bam":
+            payload_chunk = _encode_bam_data(sample)
+            if not payload_chunk:
+                logger.warning(f"BAM 인코딩 실패, Raw 모드로 대체 시도. (SEQ: {message_seq})")
+                payload_chunk = _pack_raw_data(sample)
+                if not payload_chunk: return None
+        else:
+            logger.error(f"알 수 없는 압축 모드: {compression_mode}"); return None
     elif payload_size > 0:
-        # 3. 더미 데이터 기반 페이로드 생성
         payload_chunk = os.urandom(payload_size)
-        logger.debug(f"더미 데이터 페이로드 생성됨: {len(payload_chunk)}B")
+    else: logger.error(f"잘못된 payload_size: {payload_size}"); return None
 
-    else:
-        logger.error(f"잘못된 payload_size: {payload_size}")
-        return None
-
-    # 4. 프레임 콘텐츠 생성: [SEQ | PAYLOAD]
     frame_content = bytes([message_seq % 256]) + payload_chunk
-
-    # 5. 프레임 크기 확인 및 자르기
     if len(frame_content) > MAX_FRAME_CONTENT_SIZE:
-        logger.warning(
-            f"생성된 프레임 콘텐츠({len(frame_content)}B)가 최대 크기({MAX_FRAME_CONTENT_SIZE}B)를 초과. "
-            f"데이터를 자릅니다."
-        )
+        logger.warning(f"생성된 프레임({len(frame_content)}B)이 최대 크기({MAX_FRAME_CONTENT_SIZE}B) 초과. 자릅니다.")
         frame_content = frame_content[:MAX_FRAME_CONTENT_SIZE]
-
-    log_mode = "Sensor Data" if payload_size == 0 else f"Dummy Data ({payload_size}B)"
-    logger.debug(f"프레임 생성 완료 (mode: {compression_mode}, payload: {log_mode}): "
-                 f"MESSAGE_SEQ={message_seq % 256}, 최종 콘텐츠 길이={len(frame_content)}B")
     return frame_content
