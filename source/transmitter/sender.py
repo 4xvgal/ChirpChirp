@@ -29,10 +29,10 @@ except ImportError:
 logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(name)s - %(levelname)s - %(message)s")
 logger = logging.getLogger(__name__)
 
-SEND_COUNT         = 200
 
-GENERIC_TIMEOUT    = 5
-RETRY_HANDSHAKE    = 5
+SEND_COUNT         = 100
+GENERIC_TIMEOUT    = 10
+RETRY_HANDSHAKE    = 10
 RETRY_QUERY_PERMIT = 50
 RETRY_DATA_ACK     = 50
 SYN_MSG            = b"SYN\r\n"
