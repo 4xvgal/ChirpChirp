@@ -152,11 +152,35 @@ def send_data(n: int, mode: str, compression_mode: str, payload_size: int) -> in
         
         sample = sr.get_sensor_data() if payload_size == 0 and sr else {}
         if payload_size == 0 and (not sample or 'ts' not in sample):
-            logger.warning(f"[메시지 {msg_idx}] 유효하지 않은 샘플, 건너뜀."); current_message_seq_counter = (current_message_seq_counter + 1) % 256; time.sleep(1); continue
+            logger.warning(f"[메시지 {msg_idx}] 유효하지 않은 샘플, 건너뜀.")
+            # 건너뛴 메시지도 로그에 남기기
+            log_tx_event(
+                frame_seq=current_message_seq_counter,
+                attempt_num=0,
+                event_type='SKIP_INVALID_SAMPLE',
+                ts_sent=None,
+                total_attempts_final=0,
+                ack_received_final=False
+            )
+            current_message_seq_counter = (current_message_seq_counter + 1) % 256
+            time.sleep(1)
+            continue
 
         frame_content = create_frame(sample, current_message_seq_counter, compression_mode, payload_size)
         if not frame_content:
-            logger.warning(f"[메시지 {msg_idx}] 프레임 생성 실패, 건너뜀"); current_message_seq_counter = (current_message_seq_counter + 1) % 256; time.sleep(1); continue
+            logger.warning(f"[메시지 {msg_idx}] 프레임 생성 실패, 건너뜀")
+            # 프레임 생성 실패도 로그에 남기기
+            log_tx_event(
+                frame_seq=current_message_seq_counter,
+                attempt_num=0,
+                event_type='SKIP_FRAME_CREATION_FAIL',
+                ts_sent=None,
+                total_attempts_final=0,
+                ack_received_final=False
+            )
+            current_message_seq_counter = (current_message_seq_counter + 1) % 256
+            time.sleep(1)
+            continue
         
         if mode == "PDR": pdr_messages_tx_initiated_count += 1
         raw_data_packet = bytes([len(frame_content)]) + frame_content
@@ -173,7 +197,19 @@ def send_data(n: int, mode: str, compression_mode: str, payload_size: int) -> in
             if len(permit_ack_bytes) == ACK_PACKET_LEN and struct.unpack("!BB", permit_ack_bytes) == (ACK_TYPE_SEND_PERMIT, frame_seq_for_ack_handling): permission_received = True
             if not permission_received and query_attempts < effective_retry_query_permit: time.sleep(1)
         if not permission_received:
-            logger.error(f"[메시지 {msg_idx}] 최종 Permit 미수신. 메시지 건너뜀."); current_message_seq_counter = (current_message_seq_counter + 1) % 256; time.sleep(1); continue
+            logger.error(f"[메시지 {msg_idx}] 최종 Permit 미수신. 메시지 실패 처리.")
+            # Permit 실패도 하나의 시도이니 로그에 남기기
+            log_tx_event(
+                frame_seq=frame_seq_for_ack_handling,
+                attempt_num=query_attempts,
+                event_type='PERMIT_FINAL_FAILURE',
+                ts_sent=None,
+                total_attempts_final=query_attempts,
+                ack_received_final=False
+            )
+            current_message_seq_counter = (current_message_seq_counter + 1) % 256
+            time.sleep(1)
+            continue
         
         # --- 데이터 전송 및 ACK 확인 (상세 로깅) ---
         data_tx_attempts, data_ack_received = 0, False
